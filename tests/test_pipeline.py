@@ -223,3 +223,48 @@ async def test_failed_send_is_retried_next_run(wire, monkeypatch):
     wire["set_posts"]([_post(1, REMOTE_PYTHON)])
     second = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
     assert second.delivered == 1, "недоставленное должно досылаться"
+
+
+# ---------- регрессия: БД, созданная СТАРОЙ схемой ----------
+
+
+async def test_legacy_rows_without_message_are_recovered(wire):
+    """
+    Реальный случай с прогона владельца: 9 вакансий записаны старым кодом,
+    когда колонки message ещё не было. Они лежат с delivered_at=NULL и
+    message=NULL, а посты помечены виденными — то есть заново не прочитаются.
+    Такие записи ОБЯЗАНЫ досылаться, иначе вакансии потеряны навсегда.
+    """
+    import sqlite3
+
+    # воспроизводим БД в состоянии "до миграции"
+    raw = sqlite3.connect(wire["db"])
+    raw.executescript(
+        """
+        CREATE TABLE seen_posts (channel TEXT, message_id INTEGER, processed_at TEXT,
+                                 PRIMARY KEY (channel, message_id));
+        CREATE TABLE vacancies (
+            content_hash TEXT PRIMARY KEY, channel TEXT, message_id INTEGER,
+            title TEXT, company TEXT, grade TEXT, work_format TEXT,
+            salary_min INTEGER, salary_max INTEGER, contact TEXT, score TEXT,
+            reasoning TEXT, link TEXT, posted_at TEXT, delivered_at TEXT);
+        """
+    )
+    raw.execute(
+        "INSERT INTO vacancies VALUES ('h1','@ch',1,'Senior AQA Python','Ромашка',"
+        "'senior','remote',250000,330000,'@hr','high','стек совпал',"
+        "'https://t.me/ch/1','2026-01-01T00:00:00',NULL)"
+    )
+    raw.execute("INSERT INTO seen_posts VALUES ('@ch', 1, '2026-01-01T00:00:00')")
+    raw.commit()
+    raw.close()
+
+    bot = FakeBot()
+    wire["set_posts"]([_post(1, REMOTE_PYTHON)])
+    stats = await pipeline_module.run_once(CRITERIA, bot=bot, limit=10, db_path=wire["db"])
+
+    assert stats.already_seen == 1, "пост виден — заново парсить не должны"
+    assert stats.redelivered == 1, "старая запись обязана досылаться"
+    assert len(bot.sent) == 1
+    assert "Senior AQA Python" in bot.sent[0]
+    assert "250" in bot.sent[0], "зарплата из БД должна попасть в сводку"

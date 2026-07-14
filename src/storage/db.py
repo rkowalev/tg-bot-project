@@ -126,11 +126,16 @@ def exists(conn: sqlite3.Connection, hash_value: str) -> bool:
 
 
 def pending_deliveries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Сохранённые, но не отправленные — досылаем на следующем проходе."""
+    """
+    Сохранённые, но не отправленные — досылаем на следующем проходе.
+
+    Фильтра по message тут БЫТЬ НЕ ДОЛЖНО: записи, сделанные до появления этой
+    колонки, лежат с message=NULL, а посты у них уже помечены виденными. Отсеяв
+    их здесь, мы потеряли бы вакансии навсегда — ровно это и случилось на живом
+    прогоне. Текст для таких строк собирается из полей (format_message_from_row).
+    """
     return conn.execute(
-        "SELECT content_hash, message FROM vacancies "
-        "WHERE delivered_at IS NULL AND message IS NOT NULL "
-        "ORDER BY posted_at"
+        "SELECT * FROM vacancies WHERE delivered_at IS NULL ORDER BY posted_at"
     ).fetchall()
 
 

@@ -27,7 +27,12 @@ from dataclasses import dataclass, field
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
-from src.delivery.telegram_bot import CHAT_ID, format_message, send_vacancy
+from src.delivery.telegram_bot import (
+    CHAT_ID,
+    format_message,
+    format_message_from_row,
+    send_vacancy,
+)
 from src.enrichment import enrich_vacancy
 from src.filters import Criteria, FilterResult, filter_vacancy, passes_prefilter
 from src.models.vacancy import Vacancy
@@ -134,9 +139,12 @@ async def _deliver_pending(conn, bot: Bot | None) -> int:
         return 0
     sent = 0
     for row in pending_deliveries(conn):
+        # message=NULL -> запись сделана до появления колонки; собираем текст
+        # из полей, иначе такая вакансия не уйдёт никогда
+        text = row["message"] or format_message_from_row(row)
         try:
             await bot.send_message(
-                chat_id=CHAT_ID, text=row["message"], disable_web_page_preview=True
+                chat_id=CHAT_ID, text=text, disable_web_page_preview=True
             )
         except TelegramAPIError as error:
             print(f"  !! досылка не удалась: {error}")

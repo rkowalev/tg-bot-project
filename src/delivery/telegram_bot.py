@@ -85,6 +85,40 @@ def format_message(vacancy: Vacancy, result: FilterResult, link: str) -> str:
     return text
 
 
+def format_message_from_row(row) -> str:
+    """
+    Собирает сводку из строки БД, когда готового текста нет.
+
+    Нужно для записей, сделанных до появления колонки message: они лежат
+    недоставленными, а посты уже помечены виденными — заново через конвейер их
+    не прогнать. Стека и альтернативных вилок в таблице нет, поэтому сводка
+    выйдет чуть беднее — но вакансия дойдёт, а это важнее.
+    """
+    esc = html.escape
+
+    def row_line(label: str, value) -> str:
+        return f"<b>{label}:</b> {esc(str(value))}\n" if value else ""
+
+    badge = _SCORE_BADGE.get(row["score"] or "", "⚪️ —")
+    text = f"{badge}  <b>{esc(row['title'] or 'Должность не распознана')}</b>\n\n"
+    text += row_line("Компания", row["company"])
+
+    if row["salary_min"]:
+        low = row["salary_min"] // 1000
+        high = (row["salary_max"] or row["salary_min"]) // 1000
+        text += row_line("Зарплата", f"{low}к" if low == high else f"{low}–{high}к")
+
+    text += row_line("Формат", _FORMAT_RU.get(row["work_format"] or ""))
+    text += row_line("Грейд", _GRADE_RU.get(row["grade"] or ""))
+    if row["reasoning"]:
+        text += f"\n<i>{esc(row['reasoning'])}</i>\n"
+    if row["contact"]:
+        text += f"\n<b>Отклик:</b> {esc(row['contact'])}\n"
+    if row["link"]:
+        text += f'\n<a href="{esc(row["link"])}">Пост в канале</a>'
+    return text
+
+
 async def send_vacancy(bot: Bot, vacancy: Vacancy, result: FilterResult, link: str) -> bool:
     """True — доставлено. Ошибка отправки не роняет прогон."""
     try:
