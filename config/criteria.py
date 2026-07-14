@@ -10,14 +10,19 @@
 """
 
 from src.filters.criteria import Criteria
-from src.models.vacancy import Grade, WorkFormat
+from src.models.vacancy import WorkFormat
 
 RUSLAN = Criteria(
     work_formats=[WorkFormat.REMOTE],
-    # 200к для отладки: даёт ~15 вакансий/мес против ~8 на целевых 270к —
-    # на таком потоке видно, как работает фильтр. Поднять к цели после Итерации 4.
-    min_salary=200_000,
+    min_salary=230_000,
+    # ЖЁСТКО: чужой язык учить не готов. "python/go" пройдёт (Python есть),
+    # "только go" — нет.
+    languages=["Python"],
+    # МЯГКО: правилами не отсекают, идут в ИИ-оценку как контекст. Незнакомый
+    # Docker — не повод выкидывать вакансию, выучить вопрос недели.
     stack_include=["Python", "Playwright", "API", "Selenium", "pytest"],
     stack_exclude=[],
-    grades=[Grade.SENIOR, Grade.MIDDLE],
+    # Грейдом НЕ фильтруем: вакансия на middle за 250к устраивает. Реальный
+    # критерий — деньги, а грейд пусть взвешивает ИИ-оценка.
+    grades=[],
 )

@@ -15,27 +15,35 @@ NOW = datetime(2026, 1, 1)
 
 
 def _profile(**kwargs) -> ResumeProfile:
-    base = dict(stack=[], grade=Grade.UNKNOWN, work_formats=[], min_salary=None)
+    base = dict(
+        languages=[], tools=[], grade=Grade.UNKNOWN, work_formats=[], min_salary=None
+    )
     return ResumeProfile(**{**base, **kwargs})
 
 
 # ---------- маппинг резюме -> Criteria ----------
 
 
-def test_stack_becomes_stack_include():
-    criteria = _to_criteria(_profile(stack=["Python", "Playwright"]))
-    assert criteria.stack_include == ["Python", "Playwright"]
+def test_languages_and_tools_are_separated():
+    criteria = _to_criteria(_profile(languages=["Python"], tools=["Playwright", "Docker"]))
+    assert criteria.languages == ["Python"], "язык — жёсткий критерий, отдельно"
+    assert criteria.stack_include == ["Playwright", "Docker"], "инструменты — мягкие"
 
 
-def test_grade_becomes_single_element_list():
+def test_grade_from_resume_does_not_filter():
+    """
+    Владелец: "есть вакансии на мидла, но платят 250к — меня устраивает".
+    Резюме говорит "я senior" — это факт о кандидате, а не требование к
+    вакансии. Фильтровать по нему = терять деньги.
+    """
     criteria = _to_criteria(_profile(grade=Grade.SENIOR))
-    assert criteria.grades == [Grade.SENIOR]
+    assert criteria.grades == [], "грейдом не фильтруем, реальный критерий — зарплата"
 
 
-def test_unknown_grade_gives_empty_list_not_unknown():
-    # пустой список = критерий не применяется; [UNKNOWN] отсекал бы всё подряд
-    criteria = _to_criteria(_profile(grade=Grade.UNKNOWN))
-    assert criteria.grades == []
+def test_language_in_tools_slot_is_dropped():
+    # если модель перепутала колонки, язык не должен утечь в мягкие критерии
+    criteria = _to_criteria(_profile(languages=["Python"], tools=["Java", "Docker"]))
+    assert criteria.stack_include == ["Docker"]
 
 
 def test_salary_and_formats_carried_over():
@@ -54,17 +62,25 @@ def test_unknown_technology_is_dropped_not_raised():
     Резюме почти наверняка содержит что-то за пределами config/stack.py.
     Criteria на таком падает — онбординг из-за этого падать не должен.
     """
-    criteria = _to_criteria(_profile(stack=["Python", "Katalon", "SoapUI", "pytest"]))
-    assert criteria.stack_include == ["Python", "pytest"], "незнакомое молча отбрасываем"
+    criteria = _to_criteria(
+        _profile(languages=["Python"], tools=["Katalon", "SoapUI", "pytest"])
+    )
+    assert criteria.stack_include == ["pytest"], "незнакомое молча отбрасываем"
 
 
 def test_technology_case_is_normalized():
-    criteria = _to_criteria(_profile(stack=["PYTHON", "playwright"]))
-    assert criteria.stack_include == ["Python", "Playwright"]
+    criteria = _to_criteria(_profile(languages=["PYTHON"], tools=["playwright"]))
+    assert criteria.languages == ["Python"]
+    assert criteria.stack_include == ["Playwright"]
+
+
+def test_language_aliases_from_resume():
+    criteria = _to_criteria(_profile(languages=["golang", "python"]))
+    assert criteria.languages == ["Go", "Python"]
 
 
 def test_all_stack_unknown_gives_empty_not_crash():
-    criteria = _to_criteria(_profile(stack=["Katalon", "Robot Framework"]))
+    criteria = _to_criteria(_profile(tools=["Katalon", "Robot Framework"]))
     assert criteria.stack_include == []
 
 
@@ -74,21 +90,22 @@ def test_all_stack_unknown_gives_empty_not_crash():
 def test_describe_is_human_readable():
     text = describe(
         Criteria(
-            stack_include=["Python", "Playwright"],
-            grades=[Grade.SENIOR],
+            languages=["Python"],
+            stack_include=["Playwright", "Docker"],
             work_formats=[WorkFormat.REMOTE],
-            min_salary=270_000,
+            min_salary=230_000,
         )
     )
-    assert "Python, Playwright" in text
-    assert "senior" in text
-    assert "от 270к" in text
+    assert "Python" in text
+    assert "от 230к" in text
+    # человек должен понимать, что жёстко, а что нет
+    assert "отсекаю" in text
+    assert "доучить" in text
 
 
 def test_describe_handles_empty_criteria():
     text = describe(Criteria())
     assert "не распознан" in text
-    assert "любой" in text
 
 
 # ---------- ГЛАВНОЕ: задел с итерации 3 сработал ----------
@@ -101,10 +118,11 @@ def test_criteria_from_resume_work_in_filter_unchanged():
     """
     criteria = _to_criteria(
         _profile(
-            stack=["Python", "Playwright"],
+            languages=["Python"],
+            tools=["Playwright"],
             grade=Grade.SENIOR,
             work_formats=[WorkFormat.REMOTE],
-            min_salary=270_000,
+            min_salary=230_000,
         )
     )
 
@@ -113,12 +131,17 @@ def test_criteria_from_resume_work_in_filter_unchanged():
         posted_at=NOW,
         is_vacancy=True,
         work_format=WorkFormat.REMOTE,
-        grade=Grade.SENIOR,
+        grade=Grade.MIDDLE,  # мидл с хорошей зарплатой — устраивает
         stack=["Python", "pytest"],
-        salary=Salary(raw="300к", min_value=300_000, max_value=300_000),
+        salary=Salary(raw="250к", min_value=250_000, max_value=250_000),
     )
     passed, reasons = passes_hard_rules(good, criteria)
-    assert passed is True, f"подходящая вакансия должна пройти: {reasons}"
+    assert passed is True, f"мидл за 250к должен пройти: {reasons}"
+
+    java = good.model_copy(update={"stack": ["Java", "Selenium"]})
+    passed, reasons = passes_hard_rules(java, criteria)
+    assert passed is False, "Java-вакансия должна отсекаться правилами"
+    assert "язык Java" in reasons[0]
 
     bad = good.model_copy(update={"work_format": WorkFormat.OFFICE})
     passed, _ = passes_hard_rules(bad, criteria)

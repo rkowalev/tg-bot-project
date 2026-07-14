@@ -305,15 +305,28 @@ def _extract_grade(text: str) -> tuple[str | None, Grade]:
 # фильтра. Пока список был локальным, критерий "pytest" молча не матчился —
 # парсер такого слова не знал, и никто об этом не узнавал.
 
+# Написания, которые надо искать в тексте, -> канон. Синонимы важны: "golang"
+# и ".NET" в постах встречаются, а "Go" и "C#" в этих же постах может не быть.
+_STACK_SPELLINGS: list[tuple[str, str]] = [(tech, tech) for tech in STACK_VOCABULARY] + [
+    ("golang", "Go"),
+    (".NET", "C#"),
+    ("dotnet", "C#"),
+]
+
 # Паттерны компилируем один раз на импорте, а не на каждый пост.
 _STACK_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(rf"(?<!\w){re.escape(tech)}(?!\w)", re.IGNORECASE), tech)
-    for tech in STACK_VOCABULARY
+    (re.compile(rf"(?<!\w){re.escape(spelling)}(?!\w)", re.IGNORECASE), tech)
+    for spelling, tech in _STACK_SPELLINGS
 ]
 
 
 def _extract_stack(text: str) -> list[str]:
-    return [tech for pattern, tech in _STACK_PATTERNS if pattern.search(text)]
+    """Порядок — как в словаре; дубли от синонимов схлопываем."""
+    found: list[str] = []
+    for pattern, tech in _STACK_PATTERNS:
+        if tech not in found and pattern.search(text):
+            found.append(tech)
+    return found
 
 
 # ---------- сборка модели ----------

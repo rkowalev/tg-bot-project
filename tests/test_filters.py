@@ -150,17 +150,71 @@ def test_stack_intersection_passes():
     assert passed is True
 
 
-def test_stack_no_intersection_rejected():
-    passed, reasons = passes_hard_rules(
-        _vacancy(stack=["Java", "Kotlin"]), Criteria(stack_include=["Python"])
+def test_missing_tool_does_not_reject():
+    """
+    Инструменты правилами НЕ отсекают: нет Docker в резюме, а в вакансии нужен —
+    выучить неделя. Раньше такая вакансия выкидывалась, владелец поймал это.
+    """
+    passed, _ = passes_hard_rules(
+        _vacancy(stack=["Python", "Docker", "Kubernetes"]),
+        Criteria(stack_include=["Python", "Playwright"], languages=["Python"]),
     )
-    assert passed is False
-    assert "не пересёкся" in reasons[0]
+    assert passed is True, "незнакомый инструмент — не повод отказать"
 
 
 def test_empty_stack_is_not_rejected():
-    passed, _ = passes_hard_rules(_vacancy(stack=[]), Criteria(stack_include=["Python"]))
+    passed, _ = passes_hard_rules(_vacancy(stack=[]), Criteria(languages=["Python"]))
     assert passed is True, "стек не распознан — неизвестность, а не отказ"
+
+
+# ---------- язык: жёсткий критерий ----------
+
+
+def test_foreign_language_rejected():
+    # реальный случай: Java-вакансии доезжали до бота через пересечение по Selenium
+    passed, reasons = passes_hard_rules(
+        _vacancy(stack=["Java", "Selenium", "API"]), Criteria(languages=["Python"])
+    )
+    assert passed is False
+    assert "язык Java" in reasons[0]
+
+
+def test_python_slash_go_passes():
+    # "python/go — норм, но если только go — уже нет"
+    passed, _ = passes_hard_rules(
+        _vacancy(stack=["Python", "Go"]), Criteria(languages=["Python"])
+    )
+    assert passed is True, "Python есть среди языков вакансии — годится"
+
+
+def test_only_go_rejected():
+    passed, reasons = passes_hard_rules(
+        _vacancy(stack=["Go", "Docker"]), Criteria(languages=["Python"])
+    )
+    assert passed is False
+    assert "язык Go" in reasons[0]
+
+
+def test_vacancy_without_named_language_is_not_rejected():
+    # язык не назван -> неизвестность, а не отказ (как с зарплатой)
+    passed, _ = passes_hard_rules(
+        _vacancy(stack=["Selenium", "Postman"]), Criteria(languages=["Python"])
+    )
+    assert passed is True
+
+
+def test_empty_languages_criterion_passes_everything():
+    passed, _ = passes_hard_rules(_vacancy(stack=["Java"]), Criteria())
+    assert passed is True, "пустой критерий = не применяется"
+
+
+def test_criteria_rejects_tool_as_language():
+    with pytest.raises(ValueError, match="не язык"):
+        Criteria(languages=["Docker"])
+
+
+def test_language_aliases_normalized():
+    assert Criteria(languages=["golang", "c#"]).languages == ["Go", "C#"]
 
 
 def test_stack_entirely_excluded_rejected():
@@ -191,7 +245,7 @@ def test_all_reasons_collected_not_just_first():
         Criteria(
             work_formats=[WorkFormat.REMOTE],
             grades=[Grade.SENIOR],
-            stack_include=["Python"],
+            languages=["Python"],
             min_salary=200_000,
         ),
     )

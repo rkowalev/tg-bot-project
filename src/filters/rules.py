@@ -11,6 +11,7 @@
 потому, что автор поста написал зарплату нестандартно.
 """
 
+from config.stack import languages_in
 from src.filters.criteria import Criteria
 from src.models.vacancy import Grade, Vacancy, WorkFormat
 
@@ -19,8 +20,8 @@ def passes_prefilter(vacancy: Vacancy, criteria: Criteria) -> bool:
     """
     Отсев ДО обогащения — на данных одних регулярок. Экономит вызов ИИ.
 
-    Проверяем только формат работы и стек: их регулярки берут надёжно
-    (формат ~95%, стек по словарю). Зарплату и грейд здесь трогать НЕЛЬЗЯ —
+    Проверяем только формат работы и язык: их регулярки берут надёжно
+    (формат ~95%, язык по словарю). Зарплату и грейд здесь трогать НЕЛЬЗЯ —
     именно их чинит ИИ (грейд у регулярок верен лишь в ~54% случаев), и отсев
     по ним на сырых данных выкинул бы вакансии, которые обогащение исправило бы.
 
@@ -34,10 +35,10 @@ def passes_prefilter(vacancy: Vacancy, criteria: Criteria) -> bool:
     ):
         return False
 
-    if criteria.stack_include and vacancy.stack:
-        wanted = {tech.lower() for tech in criteria.stack_include}
-        if not ({tech.lower() for tech in vacancy.stack} & wanted):
-            return False
+    # язык — жёсткий критерий и регулярки берут его надёжно (по словарю),
+    # значит чужой ЯП можно отсечь ещё до обогащения, бесплатно
+    if _language_reasons(vacancy, criteria):
+        return False
 
     return True
 
@@ -76,6 +77,7 @@ def passes_hard_rules(vacancy: Vacancy, criteria: Criteria) -> tuple[bool, list[
         reasons.append(f"грейд {vacancy.grade.value} не входит в {allowed}")
 
     reasons.extend(_salary_reasons(vacancy, criteria))
+    reasons.extend(_language_reasons(vacancy, criteria))
     reasons.extend(_stack_reasons(vacancy, criteria))
 
     return not reasons, reasons
@@ -97,24 +99,47 @@ def _salary_reasons(vacancy: Vacancy, criteria: Criteria) -> list[str]:
     return []
 
 
+def _language_reasons(vacancy: Vacancy, criteria: Criteria) -> list[str]:
+    """
+    Язык — единственный жёсткий критерий по стеку.
+
+    Логика ровно как у человека: "python/go" — годится, там есть Python;
+    "только go" — нет, учить новый язык ради вакансии никто не станет.
+
+    Язык в посте не назван -> неизвестность, а не отказ (как с зарплатой).
+    """
+    if not criteria.languages:
+        return []
+
+    vacancy_languages = languages_in(vacancy.stack)
+    if not vacancy_languages:
+        return []
+    if vacancy_languages & set(criteria.languages):
+        return []
+
+    return [
+        f"язык {'/'.join(sorted(vacancy_languages))} — не из твоих "
+        f"({'/'.join(criteria.languages)})"
+    ]
+
+
 def _stack_reasons(vacancy: Vacancy, criteria: Criteria) -> list[str]:
-    reasons: list[str] = []
+    """
+    ИНСТРУМЕНТЫ ПРАВИЛАМИ НЕ ОТСЕКАЮТ.
+
+    Раньше здесь было "стек не пересёкся с желаемым" — и это выкидывало
+    вакансии, где просто нужен незнакомый Docker. Выучить инструмент — вопрос
+    недели, а вакансию мы теряли навсегда. Жёсткий критерий теперь только язык
+    (_language_reasons), а инструменты ушли в ИИ-оценку как контекст.
+
+    stack_exclude оставлен: он про "не хочу вообще", а не про "не умею".
+    """
+    if not criteria.stack_exclude:
+        return []
+
     stack = {tech.lower() for tech in vacancy.stack}
-
-    if criteria.stack_exclude:
-        excluded = {tech.lower() for tech in criteria.stack_exclude}
-        # отсекаем, только если стек ЦЕЛИКОМ из стоп-технологий: одна чужая
-        # технология рядом с нужными — это норма, а не повод отказать
-        if stack and stack <= excluded:
-            reasons.append(f"стек целиком из стоп-технологий: {sorted(stack)}")
-
-    if criteria.stack_include:
-        wanted = {tech.lower() for tech in criteria.stack_include}
-        # пустой стек — неизвестность, а не отказ: пусть смотрит ИИ
-        if stack and not (stack & wanted):
-            reasons.append(
-                f"стек не пересёкся с желаемым: {sorted(stack)} vs "
-                f"{sorted(criteria.stack_include)}"
-            )
-
-    return reasons
+    excluded = {tech.lower() for tech in criteria.stack_exclude}
+    # отсекаем, только если стек ЦЕЛИКОМ из стоп-технологий
+    if stack and stack <= excluded:
+        return [f"стек целиком из стоп-технологий: {sorted(stack)}"]
+    return []

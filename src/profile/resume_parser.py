@@ -22,7 +22,7 @@ import anthropic
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError
 
-from config.stack import STACK_VOCABULARY, canonical
+from config.stack import LANGUAGES, TOOLS, canonical, is_language
 from src.filters.criteria import Criteria
 from src.models.vacancy import Grade, WorkFormat
 
@@ -35,8 +35,11 @@ MAX_TOKENS = 1024
 class ResumeProfile(BaseModel):
     """Что ИИ вычитывает из резюме. В Criteria превращает parse_resume."""
 
-    stack: list[str] = Field(
-        description="Технологии кандидата. ТОЛЬКО из разрешённого списка, точное написание оттуда же. Что не в списке — пропусти."
+    languages: list[str] = Field(
+        description="Языки программирования, на которых кандидат РЕАЛЬНО пишет. Только из списка языков. Обычно один-два — не тащи те, что упомянуты вскользь."
+    )
+    tools: list[str] = Field(
+        description="Инструменты и фреймворки кандидата. Только из списка инструментов. Что не в списке — пропусти."
     )
     grade: Grade = Field(
         description="Грейд по опыту и формулировкам резюме. unknown — если определить нельзя."
@@ -54,25 +57,31 @@ def _system_prompt() -> str:
 Ты разбираешь резюме IT-специалиста (обычно QA/тестирование) и вытаскиваешь из \
 него критерии поиска работы.
 
-Разрешённый список технологий — выбирай ТОЛЬКО из него, слово в слово:
-{", ".join(STACK_VOCABULARY)}
+Языки программирования — выбирай ТОЛЬКО отсюда, слово в слово:
+{", ".join(LANGUAGES)}
+
+Инструменты и фреймворки — ТОЛЬКО отсюда, слово в слово:
+{", ".join(TOOLS)}
 
 Правила:
 
-1. stack — технологии, которыми кандидат ВЛАДЕЕТ. Только из списка выше. \
-Если в резюме есть что-то, чего в списке нет, — просто пропусти, не выдумывай \
-замену. Не тащи всё подряд: бери то, что кандидат реально указывает как свой \
-рабочий инструмент, а не упоминает вскользь.
+1. languages — языки, на которых кандидат РЕАЛЬНО пишет код. Обычно один-два. \
+Это самый важный пункт: по нему потом жёстко отсекаются вакансии на чужих \
+языках. Не тащи язык, упомянутый вскользь ("видел Java у коллег") или из \
+давнего прошлого — только то, на чём кандидат работает.
 
-2. grade — по совокупности: суммарный опыт, уровень задач, формулировки \
+2. tools — инструменты и фреймворки, которыми кандидат владеет. Не из списка — \
+пропусти, не выдумывай замену. Не тащи всё подряд.
+
+3. grade — по совокупности: суммарный опыт, уровень задач, формулировки \
 ("ведущий", "руководил командой"). До 1 года -> junior, 1-3 -> middle, \
 3-5 -> senior, руководство командой -> lead. Не угадывай — если непонятно, unknown.
 
-3. work_formats — что кандидат ХОЧЕТ, а не где работал раньше. Ищи явные \
+4. work_formats — что кандидат ХОЧЕТ, а не где работал раньше. Ищи явные \
 формулировки ("удалённо", "готов к релокации", "только офис"). Ничего про это \
 нет — пустой список.
 
-4. min_salary — зарплатные ОЖИДАНИЯ. "от 270к" -> 270000; "270 000 руб" -> \
+5. min_salary — зарплатные ОЖИДАНИЯ. "от 270к" -> 270000; "270 000 руб" -> \
 270000. Если указана вилка ожиданий — бери нижнюю границу. Нет — null. \
 Зарплату с прошлых мест работы за ожидания НЕ считай."""
 
@@ -133,29 +142,47 @@ async def parse_resume(text: str) -> Criteria:
 
 def _to_criteria(profile: ResumeProfile) -> Criteria:
     """
-    Страховка на случай, если модель всё-таки вернула технологию не из словаря:
+    Страховка на случай, если модель вернула технологию не из словаря:
     отбрасываем незнакомое, а не роняем онбординг ValidationError'ом.
+
+    Грейд в критерии НЕ переносим. Резюме говорит "я senior" — это факт о
+    кандидате, а не требование к вакансии. Вакансия на middle с зарплатой выше
+    порога вполне устраивает, и отсекать её по грейду — терять деньги.
+    Реальный фильтр здесь — зарплата, а грейд пусть учитывает ИИ-оценка.
     """
-    known = [tech for tech in (canonical(t) for t in profile.stack) if tech]
+    languages = [
+        tech
+        for tech in (canonical(t) for t in profile.languages)
+        if tech and is_language(tech)
+    ]
+    tools = [
+        tech
+        for tech in (canonical(t) for t in profile.tools)
+        if tech and not is_language(tech)
+    ]
 
     return Criteria(
         work_formats=profile.work_formats,
         min_salary=profile.min_salary,
-        stack_include=known,
+        languages=languages,
+        stack_include=tools,
         stack_exclude=[],
-        grades=[profile.grade] if profile.grade is not Grade.UNKNOWN else [],
+        grades=[],
     )
 
 
 def describe(criteria: Criteria) -> str:
     """Человекочитаемо — это показывают на подтверждении, а не model_dump."""
-    grades = ", ".join(g.value for g in criteria.grades) or "любой"
+    languages = ", ".join(criteria.languages) or "не распознан"
     formats = ", ".join(f.value for f in criteria.work_formats) or "любой"
-    stack = ", ".join(criteria.stack_include) or "не распознан"
+    tools = ", ".join(criteria.stack_include) or "не распознаны"
     salary = f"от {criteria.min_salary // 1000}к" if criteria.min_salary else "не указана"
-    return (
-        f"<b>Стек:</b> {stack}\n"
-        f"<b>Грейд:</b> {grades}\n"
-        f"<b>Формат:</b> {formats}\n"
-        f"<b>Зарплата:</b> {salary}"
-    )
+    lines = [
+        f"<b>Язык:</b> {languages}  <i>(вакансии на других языках отсекаю)</i>",
+        f"<b>Зарплата:</b> {salary}",
+        f"<b>Формат:</b> {formats}",
+        f"<b>Инструменты:</b> {tools}  <i>(не отсекаю — их можно доучить)</i>",
+    ]
+    if criteria.grades:
+        lines.append(f"<b>Грейд:</b> {', '.join(g.value for g in criteria.grades)}")
+    return "\n".join(lines)

@@ -16,16 +16,40 @@ stack_include и grades ("что я умею"), но min_salary и work_formats 
 
 from pydantic import BaseModel, Field, field_validator
 
-from config.stack import STACK_VOCABULARY, canonical
+from config.stack import LANGUAGES, STACK_VOCABULARY, canonical, is_language
 from src.models.vacancy import Grade, WorkFormat
 
 
 class Criteria(BaseModel):
     work_formats: list[WorkFormat] = Field(default_factory=list)
     min_salary: int | None = None
-    stack_include: list[str] = Field(default_factory=list)  # желаемые технологии
+
+    # ЖЁСТКО: языки, на которых человек готов работать. Учить новый ЯП ради
+    # вакансии никто не станет, поэтому чужой язык — это отказ правилами,
+    # бесплатно. Пусто = критерий не применяется.
+    languages: list[str] = Field(default_factory=list)
+
+    # МЯГКО: желаемые инструменты. Правилами НЕ отсекают — нет Docker в резюме,
+    # а в вакансии он нужен? Выучить неделя, выкидывать вакансию нельзя.
+    # Используется только ИИ-оценкой как контекст.
+    stack_include: list[str] = Field(default_factory=list)
     stack_exclude: list[str] = Field(default_factory=list)  # стоп-технологии
+
     grades: list[Grade] = Field(default_factory=list)
+
+    @field_validator("languages")
+    @classmethod
+    def _known_languages(cls, values: list[str]) -> list[str]:
+        result = []
+        for value in values:
+            name = canonical(value)
+            if name is None or not is_language(name):
+                raise ValueError(
+                    f"{value!r} — не язык из config/stack.py. Известные: "
+                    f"{', '.join(LANGUAGES)}"
+                )
+            result.append(name)
+        return result
 
     @field_validator("stack_include", "stack_exclude")
     @classmethod
