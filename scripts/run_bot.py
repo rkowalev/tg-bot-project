@@ -36,7 +36,10 @@ async def main() -> None:
     print(f"бот @{me.username} запущен, слушаю кнопки. Ctrl+C — стоп")
     print("в Telegram: открой чат с ботом и отправь /start")
     try:
-        await dispatcher.start_polling(bot)
+        # drop_pending_updates: пока бот не работал, Telegram копил нажатия в
+        # очереди и отдал бы их все разом при старте — отсюда дубли ответов.
+        # Бот у нас не круглосуточный, накопленное неактуально.
+        await dispatcher.start_polling(bot, drop_pending_updates=True)
     finally:
         await bot.session.close()
 

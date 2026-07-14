@@ -24,7 +24,7 @@ from aiogram.types import (
 )
 
 from src.delivery.telegram_bot import format_message_from_row
-from src.profile import ResumeParseError, describe, parse_resume
+from src.profile import DocumentError, ResumeParseError, describe, extract_text, parse_resume
 from src.storage import (
     connect,
     count_unseen,
@@ -90,7 +90,7 @@ digest_keyboard = InlineKeyboardMarkup(
 
 def _ask_resume() -> str:
     return (
-        "Пришли своё резюме — текстом в сообщении или файлом .txt\n\n"
+        "Пришли своё резюме — текстом в сообщении или файлом (PDF, TXT)\n\n"
         "Я вытащу из него стек, грейд, желаемый формат и зарплатные ожидания, "
         "покажу что понял, и после твоего подтверждения начну искать вакансии."
     )
@@ -122,19 +122,27 @@ async def btn_update_resume(message: Message, state: FSMContext) -> None:
     await message.answer(_ask_resume())
 
 
+# Резюме с hh.ru весит пару сотен КБ. Всё, что сильно больше, — не резюме,
+# и качать это в память незачем.
+MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
+
+
 async def _extract_text(message: Message) -> str | None:
-    """Текст сообщения или содержимое .txt. pdf/docx осознанно не поддержаны."""
-    if message.document:
-        name = (message.document.file_name or "").lower()
-        if not name.endswith(".txt"):
-            await message.answer(
-                "Пока понимаю только .txt или текст сообщением.\n"
-                "Скопируй резюме текстом или сохрани как .txt"
-            )
-            return None
-        buffer = await message.bot.download(message.document)
-        return buffer.read().decode("utf-8", errors="replace")
-    return message.text
+    """Текст сообщения или содержимое файла. None -> ответ уже отправлен."""
+    if not message.document:
+        return message.text
+
+    document = message.document
+    if document.file_size and document.file_size > MAX_DOCUMENT_BYTES:
+        await message.answer("Файл больше 5 МБ — это вряд ли резюме. Пришли текстом.")
+        return None
+
+    buffer = await message.bot.download(document)
+    try:
+        return extract_text(document.file_name or "", buffer.read())
+    except DocumentError as error:
+        await message.answer(str(error))
+        return None
 
 
 @router.message(Onboarding.waiting_resume)

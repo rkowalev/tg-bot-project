@@ -4,5 +4,7 @@ python-dotenv
 pydantic
 anthropic
 aiogram
+pypdf
 pytest
 pytest-asyncio
+reportlab
