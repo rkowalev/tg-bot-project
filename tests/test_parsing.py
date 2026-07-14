@@ -138,6 +138,57 @@ def test_salary_bare_single_fallback_does_not_grab_unrelated_number():
     assert "salary_not_parsed" in vacancy.parse_flags
 
 
+def test_title_by_label_synonyms():
+    # авторы пишут метку как попало — по замеру на 300 постах это ~81% случаев
+    for label in ("Должность", "Вакансия", "Позиция", "Роль", "Role", "Ищу", "Требуется"):
+        vacancy = parse_vacancy(f"{label}: QA Automation Engineer\nЗП: 200 000", NOW)
+        assert vacancy.title == "QA Automation Engineer", f"метка {label!r} не сработала"
+
+
+def test_title_fallback_first_line_after_hashtags():
+    # должности без метки: заголовок — первая содержательная строка
+    text = "#вакансия #qa #удаленка\nТестировщик ПО (Manual QA)\nКомпания: РосКо\nЗП: 80 000 - 120 000"
+    vacancy = parse_vacancy(text, NOW)
+    assert vacancy.title == "Тестировщик ПО (Manual QA)"
+
+
+def test_title_fallback_skips_label_lines():
+    # "Компания: X" — метка, а не заголовок; должность ниже
+    text = "#вакансия\nКомпания: OUTKOD\nИнженер-тестировщик данных Middle+"
+    vacancy = parse_vacancy(text, NOW)
+    assert vacancy.title == "Инженер-тестировщик данных Middle+"
+
+
+def test_title_fallback_skips_task_bullet():
+    # пункт списка задач не должен становиться должностью
+    text = "#вакансия\nПроведение ручного тестирования информационной системы «Бюджет»;"
+    vacancy = parse_vacancy(text, NOW)
+    assert vacancy.title is None
+    assert "title_not_parsed" in vacancy.parse_flags
+
+
+def test_title_service_post_stays_empty():
+    # "вакансия будет удалена" -> "будет удалена" не должность (нет профильного слова)
+    text = "Укажите название компании или КА, а также вилку, или вакансия будет удалена"
+    vacancy = parse_vacancy(text, NOW)
+    assert vacancy.title is None
+    assert "title_not_parsed" in vacancy.parse_flags
+
+
+def test_title_not_taken_from_prose_line():
+    # проза длиннее 9 слов — не должность, хоть и содержит "инженера"
+    text = "#вакансия\nКомпания Selecty находится в поисках QA Full stack инженера под банковский проект:"
+    vacancy = parse_vacancy(text, NOW)
+    assert vacancy.title is None
+
+
+def test_title_spam_post_stays_empty():
+    # пост не про вакансию — профильного слова нет, заголовок не выдумываем
+    vacancy = parse_vacancy("Креативы под арбитраж и не только\nУникальный дизайн", NOW)
+    assert vacancy.title is None
+    assert "title_not_parsed" in vacancy.parse_flags
+
+
 def test_salary_keyword_oklad_does_not_match_inside_word_oklada():
     # реальный кейс: "Оклад" без границы слова матчился внутри "оклада"
     # (доплату до оклада по больничному) и уводил поиск на "до 10 дней"
