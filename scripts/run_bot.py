@@ -1,56 +1,39 @@
 """
-Точка входа: один запуск = один проход конвейера.
+Бот — отвечает на кнопки. Долгоживущий процесс.
 
-Вечного polling-цикла НЕТ намеренно: частый опрос каналов через Telethon —
-риск бана техаккаунта. Запускать по cron или руками.
+Это НЕ опрос каналов: polling здесь — это aiogram, слушающий нажатия кнопок в
+Telegram. Каналы через Telethon опрашивает только scripts/daily_fetch.py по
+крону, раз в сутки — таково проектное ограничение по риску бана техаккаунта.
 
-  LIMIT=50 .venv/bin/python scripts/run_bot.py     # сколько постов с канала
-  DRY_RUN=1 .venv/bin/python scripts/run_bot.py    # без отправки в Telegram
+Ни одна кнопка не запускает конвейер: показ всегда идёт из БД, мгновенно.
 
-Пример cron (раз в 2 часа):
-  0 */2 * * * cd /path/to/tg-bot-project && .venv/bin/python scripts/run_bot.py
+Запуск: .venv/bin/python scripts/run_bot.py
 """
 
 import asyncio
-import os
+import logging
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config.criteria import RUSLAN  # noqa: E402
-from src.delivery import make_bot  # noqa: E402
-from src.enrichment.enricher import STATS as CACHE  # noqa: E402
-from src.pipeline import run_once  # noqa: E402
+from aiogram import Dispatcher  # noqa: E402
 
-LIMIT = int(os.environ.get("LIMIT", "50"))
-DRY_RUN = os.environ.get("DRY_RUN") == "1"
+from src.delivery import make_bot  # noqa: E402
+from src.delivery.bot_ui import router  # noqa: E402
 
 
 async def main() -> None:
-    bot = None if DRY_RUN else make_bot()
-    started = time.perf_counter()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    bot = make_bot()
+    dispatcher = Dispatcher()
+    dispatcher.include_router(router)
 
-    print(f"Критерии: {RUSLAN.model_dump()}")
-    print(f"Постов с канала: {LIMIT}{'  [DRY_RUN — без отправки]' if DRY_RUN else ''}\n")
-
+    print("бот запущен, слушаю кнопки. Ctrl+C — стоп")
     try:
-        stats = await run_once(RUSLAN, bot, LIMIT)
+        await dispatcher.start_polling(bot)
     finally:
-        if bot is not None:
-            await bot.session.close()
-
-    elapsed = time.perf_counter() - started
-    print("--- воронка ---")
-    print(stats.report())
-    print("\n--- цена и время ---")
-    print(f"время прогона:           {elapsed:.1f} с")
-    if CACHE.calls:
-        print(f"входных токенов без кэша:{CACHE.input_without_cache:8d}")
-        print(f"с кэшем по цене вышло:   {CACHE.effective_input:8d}")
-        saved = CACHE.input_without_cache - CACHE.effective_input
-        print(f"экономия на кэше:        {saved / CACHE.input_without_cache * 100:.0f}%")
+        await bot.session.close()
 
 
 if __name__ == "__main__":

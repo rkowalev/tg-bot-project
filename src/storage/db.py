@@ -52,9 +52,19 @@ CREATE TABLE IF NOT EXISTS vacancies (
     link         TEXT,
     posted_at    TEXT,
     message      TEXT,
-    delivered_at TEXT
+    delivered_at TEXT,
+    seen_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
 );
 """
+
+# Колонки, доехавшие позже создания таблицы. CREATE TABLE IF NOT EXISTS их не
+# добавит — существующую БД надо мигрировать явно.
+_LATE_COLUMNS = {"message": "TEXT", "seen_at": "TEXT"}
 
 _WHITESPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s]")
@@ -75,12 +85,25 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path or DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
-    # CREATE TABLE IF NOT EXISTS не добавит колонку в уже существующую БД
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(vacancies)")}
-    if "message" not in columns:
-        conn.execute("ALTER TABLE vacancies ADD COLUMN message TEXT")
-        conn.commit()
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(vacancies)")}
+    added = set()
+    for name, sql_type in _LATE_COLUMNS.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE vacancies ADD COLUMN {name} {sql_type}")
+            added.add(name)
+
+    if "seen_at" in added:
+        # Вакансии, доставленные в старой push-модели, пользователь уже видел.
+        # Без этого при переходе на дайджест они разом всплыли бы как "новые".
+        conn.execute(
+            "UPDATE vacancies SET seen_at = delivered_at WHERE delivered_at IS NOT NULL"
+        )
+    conn.commit()
 
 
 # ---------- уровень 1: пост уже смотрели ----------
@@ -184,5 +207,82 @@ def save_vacancy(
 def mark_delivered(conn: sqlite3.Connection, hash_value: str) -> None:
     conn.execute(
         "UPDATE vacancies SET delivered_at = ? WHERE content_hash = ?",
+        (datetime.now().isoformat(timespec="seconds"), hash_value),
+    )
+
+
+# ---------- настройки (key-value) ----------
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def get_criteria(conn: sqlite3.Connection):
+    """None — резюме ещё не загружали, надо гнать онбординг."""
+    from src.filters.criteria import Criteria
+
+    raw = get_setting(conn, "criteria")
+    return Criteria.model_validate_json(raw) if raw else None
+
+
+def save_criteria(conn: sqlite3.Connection, criteria) -> None:
+    set_setting(conn, "criteria", criteria.model_dump_json())
+
+
+def is_fetch_enabled(conn: sqlite3.Connection) -> bool:
+    """По умолчанию включено — пока пользователь явно не поставил на паузу."""
+    return get_setting(conn, "fetch_enabled") != "0"
+
+
+def set_fetch_enabled(conn: sqlite3.Connection, enabled: bool) -> None:
+    set_setting(conn, "fetch_enabled", "1" if enabled else "0")
+
+
+def get_last_fetch_at(conn: sqlite3.Connection) -> datetime | None:
+    raw = get_setting(conn, "last_fetch_at")
+    return datetime.fromisoformat(raw) if raw else None
+
+
+def touch_last_fetch(conn: sqlite3.Connection) -> None:
+    set_setting(conn, "last_fetch_at", datetime.now().isoformat(timespec="seconds"))
+
+
+# ---------- выборки для бота (всегда из БД, без сети) ----------
+
+
+def count_unseen(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM vacancies WHERE seen_at IS NULL"
+    ).fetchone()["n"]
+
+
+def unseen_vacancies(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM vacancies WHERE seen_at IS NULL ORDER BY posted_at DESC"
+    ).fetchall()
+
+
+def vacancies_since(conn: sqlite3.Connection, since: datetime) -> list[sqlite3.Row]:
+    """Срез по дате поста — для кнопок 'за сегодня/3 дня/неделю'."""
+    return conn.execute(
+        "SELECT * FROM vacancies WHERE posted_at >= ? ORDER BY posted_at DESC",
+        (since.isoformat(),),
+    ).fetchall()
+
+
+def mark_seen_vacancy(conn: sqlite3.Connection, hash_value: str) -> None:
+    conn.execute(
+        "UPDATE vacancies SET seen_at = ? WHERE content_hash = ? AND seen_at IS NULL",
         (datetime.now().isoformat(timespec="seconds"), hash_value),
     )
