@@ -14,6 +14,7 @@
 import re
 from datetime import datetime
 
+from config.stack import STACK_VOCABULARY
 from src.models.vacancy import Grade, Salary, Vacancy, WorkFormat
 
 # ---------- предочистка текста ----------
@@ -299,23 +300,20 @@ def _extract_grade(text: str) -> tuple[str | None, Grade]:
 
 
 # ---------- стек — по словарю технологий ----------
+#
+# Словарь живёт в config/stack.py, а не здесь: на него же смотрят критерии
+# фильтра. Пока список был локальным, критерий "pytest" молча не матчился —
+# парсер такого слова не знал, и никто об этом не узнавал.
 
-_STACK_DICTIONARY = [
-    "Python", "Java", "Kotlin", "Swift", "Playwright", "Selenium", "Appium",
-    "SQL", "Postman", "Docker", "CI/CD", "Jenkins", "Git", "Jira", "Allure",
-    "REST", "Swagger", "Charles", "JMeter", "k6", "PostgreSQL", "MySQL",
-    "MongoDB", "Linux", "Bash", "JavaScript", "TypeScript", "Cypress",
-    "TestRail", "Grafana", "Kubernetes",
-]  # noqa: E501
+# Паттерны компилируем один раз на импорте, а не на каждый пост.
+_STACK_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(rf"(?<!\w){re.escape(tech)}(?!\w)", re.IGNORECASE), tech)
+    for tech in STACK_VOCABULARY
+]
 
 
 def _extract_stack(text: str) -> list[str]:
-    found = []
-    for tech in _STACK_DICTIONARY:
-        pattern = re.compile(rf"(?<!\w){re.escape(tech)}(?!\w)", re.IGNORECASE)
-        if pattern.search(text):
-            found.append(tech)
-    return found
+    return [tech for pattern, tech in _STACK_PATTERNS if pattern.search(text)]
 
 
 # ---------- сборка модели ----------
