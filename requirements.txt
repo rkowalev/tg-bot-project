@@ -2,4 +2,5 @@ requests
 telethon
 python-dotenv
 pydantic
+anthropic
 pytest

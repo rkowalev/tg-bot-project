@@ -56,4 +56,10 @@ class Vacancy(BaseModel):
     hashtags: list[str] = Field(default_factory=list)
     contact: str | None = None
 
+    # Заполняет ИИ-слой (Итерация 2), регулярки этого не умеют.
+    # None = обогащение ещё не проводилось (или упало — см. parse_flags).
+    is_vacancy: bool | None = None
+    # Вторая и последующие вилки, если в посте их несколько (основная — в salary)
+    salary_alternatives: list[str] = Field(default_factory=list)
+
     parse_flags: list[str] = Field(default_factory=list)
