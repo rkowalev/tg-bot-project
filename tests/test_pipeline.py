@@ -72,6 +72,16 @@ def wire(monkeypatch, tmp_path):
     return calls
 
 
+class FakeBot:
+    """Досылка зовёт bot.send_message напрямую — фейк должен это уметь."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent.append(text)
+
+
 def _post(message_id: int, text: str) -> RawPost:
     return RawPost(channel="@ch", message_id=message_id, text=text, posted_at=NOW)
 
@@ -85,11 +95,11 @@ CRITERIA = Criteria(work_formats=[WorkFormat.REMOTE], stack_include=["Python"])
 async def test_second_run_delivers_nothing_and_calls_no_ai(wire):
     wire["set_posts"]([_post(1, REMOTE_PYTHON)])
 
-    first = await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    first = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
     assert first.delivered == 1
     assert wire["enrich"] == 1
 
-    second = await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    second = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
     assert second.delivered == 0, "повторный прогон не должен слать то же самое"
     assert second.already_seen == 1
     assert wire["enrich"] == 1, "ИИ на виденном посте звать нельзя — это деньги"
@@ -99,11 +109,11 @@ async def test_second_run_delivers_nothing_and_calls_no_ai(wire):
 
 async def test_new_post_delivered_after_seen_one(wire):
     wire["set_posts"]([_post(1, REMOTE_PYTHON)])
-    await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
 
     other = REMOTE_PYTHON.replace("Ромашка", "Лютик")
     wire["set_posts"]([_post(1, REMOTE_PYTHON), _post(2, other)])
-    stats = await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    stats = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
 
     assert stats.already_seen == 1
     assert stats.delivered == 1, "новый пост должен доехать"
@@ -115,11 +125,11 @@ async def test_new_post_delivered_after_seen_one(wire):
 
 async def test_repost_with_different_id_is_not_delivered_twice(wire):
     wire["set_posts"]([_post(1, REMOTE_PYTHON)])
-    await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
 
     # тот же текст, но другой message_id и лишнее оформление — это репост
     wire["set_posts"]([_post(99, "**" + REMOTE_PYTHON + "**  ")])
-    stats = await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    stats = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
 
     assert stats.already_seen == 0, "id новый — уровень 1 его не поймает"
     assert stats.duplicates == 1, "поймать должен уровень 2 — хэш текста"
@@ -132,7 +142,7 @@ async def test_repost_with_different_id_is_not_delivered_twice(wire):
 
 async def test_prefilter_saves_ai_call(wire):
     wire["set_posts"]([_post(1, OFFICE_POST)])
-    stats = await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    stats = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
 
     assert stats.cut_by_prefilter == 1
     assert wire["enrich"] == 0, "офисную вакансию отсекли до ИИ — вызова быть не должно"
@@ -141,8 +151,8 @@ async def test_prefilter_saves_ai_call(wire):
 
 async def test_prefiltered_post_marked_seen(wire):
     wire["set_posts"]([_post(1, OFFICE_POST)])
-    await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
-    stats = await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
+    stats = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
     assert stats.already_seen == 1, "отсеянный пост тоже виден — второй раз не парсим"
 
 
@@ -162,7 +172,7 @@ async def test_failed_send_is_not_marked_delivered(wire, monkeypatch):
 
     monkeypatch.setattr(pipeline_module, "send_vacancy", failing_send)
     wire["set_posts"]([_post(1, REMOTE_PYTHON)])
-    stats = await pipeline_module.run_once(CRITERIA, bot=object(), limit=10, db_path=wire["db"])
+    stats = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
     assert stats.delivered == 0
 
     from src.storage import connect
@@ -171,3 +181,45 @@ async def test_failed_send_is_not_marked_delivered(wire, monkeypatch):
     row = conn.execute("SELECT delivered_at FROM vacancies").fetchone()
     conn.close()
     assert row["delivered_at"] is None, "не отправилось — не помечаем доставленным"
+
+
+# ---------- регрессия: DRY_RUN не должен съедать вакансии ----------
+
+
+async def test_dry_run_does_not_swallow_vacancy(wire):
+    """
+    Баг с живого прогона: DRY_RUN сохранял вакансию в БД до проверки бота,
+    и на первом РЕАЛЬНОМ запуске она считалась дублем и не приходила никогда.
+    """
+    wire["set_posts"]([_post(1, REMOTE_PYTHON)])
+    dry = await pipeline_module.run_once(CRITERIA, bot=None, limit=10, db_path=wire["db"])
+    assert dry.delivered == 0
+
+    # тот же пост, теперь с живым ботом — вакансия ОБЯЗАНА доехать
+    bot = FakeBot()
+    wire["set_posts"]([_post(1, REMOTE_PYTHON)])
+    real = await pipeline_module.run_once(CRITERIA, bot=bot, limit=10, db_path=wire["db"])
+    assert real.delivered == 1, "после DRY_RUN вакансия потерялась — это баг"
+    assert real.redelivered == 1, "должна уйти из очереди, а не парситься заново"
+    assert len(bot.sent) == 1, "боту обязано прийти сообщение"
+    assert "AQA Engineer" in bot.sent[0]
+
+
+async def test_failed_send_is_retried_next_run(wire, monkeypatch):
+    """Упавшая отправка не должна терять вакансию — досылаем на следующем проходе."""
+    async def failing(bot, vacancy, result, link):
+        return False
+
+    monkeypatch.setattr(pipeline_module, "send_vacancy", failing)
+    wire["set_posts"]([_post(1, REMOTE_PYTHON)])
+    first = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
+    assert first.delivered == 0
+
+    async def working(bot, vacancy, result, link):
+        wire["sent"].append(vacancy.title)
+        return True
+
+    monkeypatch.setattr(pipeline_module, "send_vacancy", working)
+    wire["set_posts"]([_post(1, REMOTE_PYTHON)])
+    second = await pipeline_module.run_once(CRITERIA, bot=FakeBot(), limit=10, db_path=wire["db"])
+    assert second.delivered == 1, "недоставленное должно досылаться"

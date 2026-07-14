@@ -21,11 +21,13 @@
 """
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
 
-from src.delivery.telegram_bot import send_vacancy
+from src.delivery.telegram_bot import CHAT_ID, format_message, send_vacancy
 from src.enrichment import enrich_vacancy
 from src.filters import Criteria, FilterResult, filter_vacancy, passes_prefilter
 from src.models.vacancy import Vacancy
@@ -34,9 +36,10 @@ from src.sources.telegram import RawPost, iter_posts
 from src.storage import (
     connect,
     content_hash,
-    exists,
+    is_delivered,
     mark_delivered,
     mark_seen,
+    pending_deliveries,
     save_vacancy,
     seen_message_ids,
 )
@@ -56,7 +59,13 @@ class RunStats:
     assessed: int = 0
     duplicates: int = 0
     delivered: int = 0
+    redelivered: int = 0
     scores: dict[str, int] = field(default_factory=dict)
+    # тайминг по этапам: без него не видно, что тормозит — сеть Telegram или ИИ
+    t_read: float = 0.0
+    t_enrich: float = 0.0
+    t_filter: float = 0.0
+    t_deliver: float = 0.0
 
     def report(self) -> str:
         lines = [
@@ -72,9 +81,19 @@ class RunStats:
         lines += [
             f"дубли по хэшу текста:    {self.duplicates}",
             f"ДОСТАВЛЕНО:              {self.delivered}",
+        ]
+        if self.redelivered:
+            lines.append(f"  досланных с прошлого:  {self.redelivered}")
+        lines += [
             "",
             f"вызовов ИИ всего:        {self.enriched + self.assessed}",
             f"сэкономлено вызовов:     {(self.already_seen + self.cut_by_prefilter) * 2}",
+            "",
+            "--- где время ---",
+            f"чтение каналов (Telethon): {self.t_read:5.1f} с",
+            f"обогащение (ИИ):           {self.t_enrich:5.1f} с",
+            f"фильтр + оценка (ИИ):      {self.t_filter:5.1f} с",
+            f"доставка:                  {self.t_deliver:5.1f} с",
         ]
         return "\n".join(lines)
 
@@ -89,6 +108,45 @@ async def _gather_limited(coros: list, limit: int) -> list:
     return await asyncio.gather(*(guarded(c) for c in coros))
 
 
+async def _warm_then_fan_out(make_coro, items: list, limit: int) -> list:
+    """
+    Сначала ОДИН вызов, потом веером остальные.
+
+    Зачем: кэш становится читаемым только после того, как первый ответ пошёл.
+    Если пустить 10 запросов разом, все 10 промахнутся мимо кэша и ЗАПИШУТ его
+    по разу — запись стоит 1.25x, и экономия падает. На живом прогоне это дало
+    57% вместо 89%. Один прогревочный вызов чинит это.
+    """
+    if not items:
+        return []
+    first = await make_coro(items[0])
+    rest = await _gather_limited([make_coro(item) for item in items[1:]], limit)
+    return [first, *rest]
+
+
+async def _deliver_pending(conn, bot: Bot | None) -> int:
+    """
+    Досылает то, что осело в очереди: DRY_RUN, упавшая отправка, обрыв сети.
+    Без этого вакансия, сохранённая но не отправленная, терялась навсегда —
+    на следующем проходе пост уже помечен виденным и до доставки не доходит.
+    """
+    if bot is None:
+        return 0
+    sent = 0
+    for row in pending_deliveries(conn):
+        try:
+            await bot.send_message(
+                chat_id=CHAT_ID, text=row["message"], disable_web_page_preview=True
+            )
+        except TelegramAPIError as error:
+            print(f"  !! досылка не удалась: {error}")
+            continue
+        mark_delivered(conn, row["content_hash"])
+        conn.commit()
+        sent += 1
+    return sent
+
+
 async def run_once(
     criteria: Criteria,
     bot: Bot | None,
@@ -99,7 +157,12 @@ async def run_once(
     conn = connect(db_path)
 
     try:
+        # --- 0: досылаем то, что осталось в очереди с прошлых проходов ---
+        stats.redelivered = await _deliver_pending(conn, bot)
+        stats.delivered += stats.redelivered
+
         # --- 1-2: читаем и сразу отсеиваем виденное ---
+        started = time.perf_counter()
         fresh: list[RawPost] = []
         seen_cache: dict[str, set[int]] = {}
         async for post in iter_posts(limit):
@@ -110,6 +173,7 @@ async def run_once(
                 stats.already_seen += 1
                 continue
             fresh.append(post)
+        stats.t_read = time.perf_counter() - started
 
         # Помечаем виденными ВСЁ, что прочитали, даже отсеянное: на следующем
         # прогоне такой пост не должен снова тратить ни времени, ни токенов.
@@ -129,17 +193,22 @@ async def run_once(
         if not candidates:
             return stats
 
-        # --- 5: обогащение, параллельно ---
-        enriched = await _gather_limited(
-            [enrich_vacancy(v) for _, v in candidates], CONCURRENCY
+        # --- 5: обогащение. Первый вызов прогревает кэш, остальные веером ---
+        started = time.perf_counter()
+        enriched = await _warm_then_fan_out(
+            enrich_vacancy, [v for _, v in candidates], CONCURRENCY
         )
+        stats.t_enrich = time.perf_counter() - started
         stats.enriched = len(enriched)
         pairs = list(zip([p for p, _ in candidates], enriched))
 
         # --- 6: фильтр (правила бесплатны, оценка — вызов), параллельно ---
+        started = time.perf_counter()
         results: list[FilterResult] = await _gather_limited(
             [filter_vacancy(v, criteria) for _, v in pairs], CONCURRENCY
         )
+        stats.t_filter = time.perf_counter() - started
+        started = time.perf_counter()
 
         # --- 7: дедуп по содержимому и доставка ---
         for (post, vacancy), result in zip(pairs, results):
@@ -155,7 +224,10 @@ async def run_once(
                 continue
 
             hash_value = content_hash(post.text)
-            if exists(conn, hash_value):
+            # дубль — только если вакансию УЖЕ ДОСТАВИЛИ. Просто наличие записи
+            # в базе не считается: она могла осесть в очереди (DRY_RUN, сбой
+            # отправки) и обязана уйти при следующей возможности.
+            if is_delivered(conn, hash_value):
                 stats.duplicates += 1
                 continue
 
@@ -168,6 +240,7 @@ async def run_once(
                 score=result.score.value if result.score else None,
                 reasoning=result.reasoning,
                 link=post.link,
+                message=format_message(vacancy, result, post.link),
             )
             conn.commit()
 
@@ -176,6 +249,7 @@ async def run_once(
                 conn.commit()
                 stats.delivered += 1
 
+        stats.t_deliver = time.perf_counter() - started
         return stats
     finally:
         conn.close()

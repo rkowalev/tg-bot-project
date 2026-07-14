@@ -93,6 +93,7 @@ def test_saved_vacancy_exists(conn):
         score="high",
         reasoning="ок",
         link="https://t.me/ch/1",
+        message="текст сводки",
     )
     assert db.exists(conn, hash_value) is True
 
@@ -109,6 +110,7 @@ def test_saving_duplicate_does_not_crash(conn):
             score="high",
             reasoning="ок",
             link="https://t.me/ch/1",
+            message="текст сводки",
         )
     rows = conn.execute("SELECT COUNT(*) AS n FROM vacancies").fetchone()
     assert rows["n"] == 1, "дубль не должен создавать вторую запись"
@@ -132,6 +134,7 @@ def test_full_vacancy_fields_persist(conn):
         score="high",
         reasoning="стек совпал",
         link="https://t.me/ch/7",
+        message="текст сводки",
     )
     row = conn.execute("SELECT * FROM vacancies").fetchone()
     assert row["title"] == "AQA Python"
@@ -156,6 +159,7 @@ def test_mark_delivered_sets_timestamp(conn):
         score="high",
         reasoning="ок",
         link="https://t.me/ch/1",
+        message="текст сводки",
     )
     db.mark_delivered(conn, hash_value)
     row = conn.execute("SELECT delivered_at FROM vacancies").fetchone()
