@@ -11,6 +11,7 @@
 """
 
 import os
+from dataclasses import dataclass
 
 import anthropic
 from dotenv import load_dotenv
@@ -56,11 +57,77 @@ SYSTEM_PROMPT = """\
    - ставку в час НЕ переводи в месяц: period="hour" и значение как есть
 
 4. Ничего не выдумывай. Нет данных в посте — null. Компанию бери только если \
-она названа; "крупный банк" — это не название, это null."""
+она названа; "крупный банк" — это не название, это null.
+
+Примеры на форматах, которые в этом канале встречаются чаще всего:
+
+Вход: "ЗП: 102 гросс"
+Выход: min=102000, max=102000, gross=true, period=month
+Почему: голое число в контексте зарплаты — это тысячи, а не 102 рубля.
+
+Вход: "Вилка: ИП 150 гросс / по ТК 100к гросс"
+Выход: min=100000, max=100000, gross=true, period=month,
+       salary_alternatives=["ИП 150 гросс"]
+Почему: вилки две, основная — по ТК; вторая уходит в alternatives как есть.
+
+Вход: "-ИП (руб/час): 1200 до 1500
+      -ТК РФ (руб, net): 180 000 - 220 000"
+Выход: min=180000, max=220000, gross=false, period=month,
+       salary_alternatives=["ИП (руб/час): 1200 до 1500"]
+Почему: месячная по ТК основная; часовую ставку в месяц НЕ пересчитываем.
+
+Вход: "Заработная плата: 80 тыс. руб. на руки"
+Выход: min=80000, max=80000, gross=false, period=month
+
+Вход: "Уровень зп: 240k net."
+Выход: min=240000, max=240000, gross=false, period=month
+
+Вход: "Вилка: до 213 к гросс"
+Выход: min=213000, max=213000, gross=true, period=month
+
+Вход: "Опыт работы в QA: от 4 лет" (грейд словом не назван)
+Выход: grade=senior
+Почему: грейд выводится из требуемого опыта, даже если слова senior в посте нет.
+
+Вход: "#вакансия #middle #senior ... Опыт работы: от 2 лет"
+Выход: grade=middle
+Почему: перечислено несколько грейдов — берём нижний.
+
+Вход: "Укажите название компании или вилку, или вакансия будет удалена"
+Выход: is_vacancy=false, остальные поля null
+Почему: это служебное сообщение модератора, а не вакансия."""
 
 
 def _build_prompt(vacancy: Vacancy) -> str:
     return f"Извлеки данные из поста:\n\n<post>\n{vacancy.raw_text}\n</post>"
+
+
+@dataclass
+class CacheStats:
+    """Счётчики usage за прогон — диагностика цены, не часть контракта модели."""
+
+    calls: int = 0
+    cache_creation: int = 0  # токены, записанные в кэш (стоят 1.25x)
+    cache_read: int = 0  # токены, прочитанные из кэша (стоят 0.1x)
+    uncached_input: int = 0  # токены мимо кэша (полная цена) — это текст поста
+
+    @property
+    def input_without_cache(self) -> int:
+        """Сколько входных токенов заплатили бы без кэша вообще."""
+        return self.uncached_input + self.cache_creation + self.cache_read
+
+    @property
+    def effective_input(self) -> int:
+        """Во сколько токенов по цене обошёлся прогон с кэшем."""
+        return int(self.uncached_input + self.cache_creation * 1.25 + self.cache_read * 0.1)
+
+
+STATS = CacheStats()
+
+
+def reset_stats() -> None:
+    global STATS
+    STATS = CacheStats()
 
 
 _client: anthropic.Anthropic | None = None
@@ -153,7 +220,17 @@ def enrich_vacancy(vacancy: Vacancy) -> Vacancy:
         response = _get_client().messages.parse(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            # cache_control кэширует ВЕСЬ префикс до этой точки: сначала схема
+            # structured output (~3.4k токенов), затем системный промпт (~0.8k).
+            # Текст поста идёт в messages, то есть ПОСЛЕ точки — он меняется на
+            # каждом вызове и в кэш не попадает, иначе кэш промахивался бы всегда.
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": _build_prompt(vacancy)}],
             output_format=EnrichmentResult,
         )
@@ -165,6 +242,12 @@ def enrich_vacancy(vacancy: Vacancy) -> Vacancy:
         return _failed(vacancy, f"connection: {error}")
     except ValidationError as error:
         return _failed(vacancy, f"invalid_response: {error}")
+
+    usage = response.usage
+    STATS.calls += 1
+    STATS.cache_creation += usage.cache_creation_input_tokens or 0
+    STATS.cache_read += usage.cache_read_input_tokens or 0
+    STATS.uncached_input += usage.input_tokens
 
     result = response.parsed_output
     if result is None:

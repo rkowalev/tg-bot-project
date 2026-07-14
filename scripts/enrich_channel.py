@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.enrichment import MODEL, enrich_vacancy  # noqa: E402
+from src.enrichment.enricher import STATS  # noqa: E402
 from src.models.vacancy import Grade  # noqa: E402
 from src.parsing import parse_vacancy  # noqa: E402
 from src.sources.telegram import iter_posts  # noqa: E402
@@ -90,6 +91,31 @@ async def main() -> None:
     else:
         for flag, count in flag_counts.most_common():
             print(f"{count:4d} ({count / posts_seen * 100:5.1f}%)  {flag}")
+
+    _print_cache_stats()
+
+
+def _print_cache_stats() -> None:
+    """Кэш эфемерный (TTL ~5 мин): внутри прогона работает, между прогонами протухает."""
+    print("\n--- prompt caching ---")
+    if STATS.calls == 0:
+        print("(вызовов не было)")
+        return
+
+    print(f"вызовов к API:            {STATS.calls}")
+    print(f"записано в кэш:           {STATS.cache_creation} токенов (цена 1.25x, один раз)")
+    print(f"прочитано из кэша:        {STATS.cache_read} токенов (цена 0.1x)")
+    print(f"мимо кэша (текст постов): {STATS.uncached_input} токенов (полная цена)")
+
+    if STATS.cache_read == 0 and STATS.calls > 1:
+        print("\nкэш НЕ сработал — префикс промпта короче порога модели (4096 у Haiku 4.5)")
+        return
+
+    saved = STATS.input_without_cache - STATS.effective_input
+    print(f"\nбез кэша заплатили бы:    {STATS.input_without_cache} входных токенов")
+    print(f"с кэшем вышло по цене:    {STATS.effective_input} входных токенов")
+    print(f"экономия:                 {saved} токенов "
+          f"({saved / STATS.input_without_cache * 100:.0f}%)")
 
 
 if __name__ == "__main__":
