@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aiogram import Dispatcher  # noqa: E402
 
-from src.delivery import make_bot  # noqa: E402
+from src.delivery import make_bot, setup_commands  # noqa: E402
 from src.delivery.bot_ui import router  # noqa: E402
 
 
@@ -29,7 +29,12 @@ async def main() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
 
-    print("бот запущен, слушаю кнопки. Ctrl+C — стоп")
+    # меню команд ставим из кода, а не через @BotFather
+    await setup_commands(bot)
+
+    me = await bot.get_me()
+    print(f"бот @{me.username} запущен, слушаю кнопки. Ctrl+C — стоп")
+    print("в Telegram: открой чат с ботом и отправь /start")
     try:
         await dispatcher.start_polling(bot)
     finally:

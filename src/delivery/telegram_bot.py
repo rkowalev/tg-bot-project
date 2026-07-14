@@ -5,8 +5,10 @@
 (api_id/api_hash + файл сессии). Здесь — бот от @BotFather под BOT_TOKEN,
 который пишет владельцу в личку. Разные механизмы, разные креды.
 
-На этой итерации бот только ШЛЁТ. Команд не принимает, вечного polling нет:
-один запуск = один проход конвейера (по cron или руками).
+Здесь — рендер сводок и создание клиента. Хендлеры кнопок и онбординг живут в
+bot_ui.py, меню команд ставится из кода (setup_commands), а не через @BotFather.
+
+Каналы этот бот не опрашивает: их читает Telethon по крону раз в сутки.
 """
 
 import html
@@ -16,6 +18,7 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand
 from dotenv import load_dotenv
 
 from src.filters.filter import FilterResult
@@ -131,6 +134,19 @@ async def send_vacancy(bot: Bot, vacancy: Vacancy, result: FilterResult, link: s
     except TelegramAPIError as error:
         print(f"  !! не отправилось: {error}")
         return False
+
+
+async def setup_commands(bot: Bot) -> None:
+    """
+    Меню команд (кнопка ☰ рядом с полем ввода).
+
+    Через @BotFather это делать не надо — команды ставятся из кода. Нужно
+    потому, что кнопка START видна только в НОВОМ чате: как только бот однажды
+    что-то прислал, она пропадает, и /start становится негде взять.
+    """
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Запустить / показать критерии")]
+    )
 
 
 def make_bot() -> Bot:
