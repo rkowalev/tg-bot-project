@@ -20,12 +20,12 @@ class FilterResult(BaseModel):
     reasoning: str | None = None
 
 
-def filter_vacancy(vacancy: Vacancy, criteria: Criteria) -> FilterResult:
+async def filter_vacancy(vacancy: Vacancy, criteria: Criteria) -> FilterResult:
     passed_rules, reasons = passes_hard_rules(vacancy, criteria)
     if not passed_rules:
         return FilterResult(passed=False, reasons=reasons)
 
-    assessment: RelevanceResult | None = assess_relevance(vacancy, criteria)
+    assessment: RelevanceResult | None = await assess_relevance(vacancy, criteria)
     if assessment is None:
         # ИИ не ответил — вакансию не теряем: правила она прошла, покажем
         # без оценки, а не выкинем молча

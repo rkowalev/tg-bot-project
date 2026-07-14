@@ -1,0 +1,110 @@
+"""
+Доставка сводок — обычный Telegram-бот через aiogram.
+
+НЕ ПУТАТЬ с sources/telegram.py: там Telethon читает каналы под техаккаунтом
+(api_id/api_hash + файл сессии). Здесь — бот от @BotFather под BOT_TOKEN,
+который пишет владельцу в личку. Разные механизмы, разные креды.
+
+На этой итерации бот только ШЛЁТ. Команд не принимает, вечного polling нет:
+один запуск = один проход конвейера (по cron или руками).
+"""
+
+import html
+import os
+
+from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
+from dotenv import load_dotenv
+
+from src.filters.filter import FilterResult
+from src.models.vacancy import Vacancy
+
+load_dotenv()
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
+
+_SCORE_BADGE = {"high": "🟢 HIGH", "medium": "🟡 MEDIUM", "low": "⚪️ LOW"}
+
+# Сводку читает человек по-русски — enum'ы наружу не показываем.
+_FORMAT_RU = {
+    "remote": "удалёнка",
+    "hybrid": "гибрид",
+    "office": "офис",
+    "unknown": "не указан",
+}
+_GRADE_RU = {
+    "junior": "junior",
+    "middle": "middle",
+    "senior": "senior",
+    "lead": "lead",
+    "unknown": "не указан",
+}
+
+
+def _salary_line(vacancy: Vacancy) -> str:
+    if not vacancy.salary or vacancy.salary.min_value is None:
+        return "не указана"
+    gross = {True: "гросс", False: "на руки", None: ""}[vacancy.salary.gross]
+    low = vacancy.salary.min_value // 1000
+    high = (vacancy.salary.max_value or vacancy.salary.min_value) // 1000
+    span = f"{low}к" if low == high else f"{low}–{high}к"
+    period = "/час" if vacancy.salary.period == "hour" else ""
+    line = f"{span}{period} {gross}".strip()
+    if vacancy.salary_alternatives:
+        line += f" (ещё: {', '.join(vacancy.salary_alternatives)})"
+    return line
+
+
+def format_message(vacancy: Vacancy, result: FilterResult, link: str) -> str:
+    """HTML: текст вакансий приходит из чужих постов, экранируем всё подряд."""
+    esc = html.escape
+
+    def row(label: str, value: str | None) -> str:
+        return f"<b>{label}:</b> {esc(value)}\n" if value else ""
+
+    badge = _SCORE_BADGE.get(result.score.value if result.score else "", "⚪️ —")
+    title = esc(vacancy.title or "Должность не распознана")
+
+    text = f"{badge}  <b>{title}</b>\n\n"
+    text += row("Компания", vacancy.company)
+    text += row("Зарплата", _salary_line(vacancy))
+    text += row(
+        "Формат",
+        _FORMAT_RU.get(vacancy.work_format.value) if vacancy.work_format else None,
+    )
+    text += row("Грейд", _GRADE_RU.get(vacancy.grade.value) if vacancy.grade else None)
+    text += row("Стек", ", ".join(vacancy.stack) if vacancy.stack else None)
+    if result.reasoning:
+        text += f"\n<i>{esc(result.reasoning)}</i>\n"
+    if vacancy.contact:
+        text += f"\n<b>Отклик:</b> {esc(vacancy.contact)}\n"
+    text += f'\n<a href="{esc(link)}">Пост в канале</a>'
+    return text
+
+
+async def send_vacancy(bot: Bot, vacancy: Vacancy, result: FilterResult, link: str) -> bool:
+    """True — доставлено. Ошибка отправки не роняет прогон."""
+    try:
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=format_message(vacancy, result, link),
+            disable_web_page_preview=True,
+        )
+        return True
+    except TelegramAPIError as error:
+        print(f"  !! не отправилось: {error}")
+        return False
+
+
+def make_bot() -> Bot:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN не найден в .env — возьми у @BotFather")
+    if not CHAT_ID:
+        raise RuntimeError("CHAT_ID не найден в .env — свой id можно узнать у @userinfobot")
+    return Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )

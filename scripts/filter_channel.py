@@ -37,10 +37,10 @@ async def main() -> None:
     print(f"Критерии: {RUSLAN.model_dump()}")
     print(f"Постов: {LIMIT}\n")
 
-    async for raw_text, posted_at in iter_posts(LIMIT):
+    async for post in iter_posts(LIMIT):
         posts += 1
-        vacancy = enrich_vacancy(parse_vacancy(raw_text, posted_at))
-        result = filter_vacancy(vacancy, RUSLAN)
+        vacancy = await enrich_vacancy(parse_vacancy(post.text, post.posted_at))
+        result = await filter_vacancy(vacancy, RUSLAN)
 
         # score is not None -> правила прошла и ИИ ответил
         if result.score is not None or not result.reasons:

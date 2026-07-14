@@ -45,8 +45,8 @@ async def main() -> None:
 
     print(f"Модель: {MODEL} | постов: {LIMIT}\n")
 
-    async for raw_text, posted_at in iter_posts(LIMIT):
-        vacancy = enrich_vacancy(parse_vacancy(raw_text, posted_at))
+    async for post in iter_posts(LIMIT):
+        vacancy = await enrich_vacancy(parse_vacancy(post.text, post.posted_at))
         posts_seen += 1
 
         flag_counts.update(flag.split(":", 1)[0] for flag in vacancy.parse_flags)

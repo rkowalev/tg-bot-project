@@ -3,4 +3,6 @@ telethon
 python-dotenv
 pydantic
 anthropic
+aiogram
 pytest
+pytest-asyncio

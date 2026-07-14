@@ -1,1 +1,3 @@
-"""Заглушка-граница. Наполнится на Итерации 4 (доставка в Telegram через aiogram)."""
+from src.delivery.telegram_bot import format_message, make_bot, send_vacancy
+
+__all__ = ["format_message", "make_bot", "send_vacancy"]

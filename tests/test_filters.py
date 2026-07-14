@@ -202,15 +202,17 @@ def test_all_reasons_collected_not_just_first():
 # ---------- оркестратор: ИИ не зовётся на отсеянных ----------
 
 
-def test_ai_not_called_when_rules_reject(monkeypatch):
+async def test_ai_not_called_when_rules_reject(monkeypatch):
     import src.filters.filter as filter_module
 
     called = []
-    monkeypatch.setattr(
-        filter_module, "assess_relevance", lambda v, c: called.append(1)
-    )
 
-    result = filter_module.filter_vacancy(
+    async def spy(vacancy, criteria):
+        called.append(1)
+
+    monkeypatch.setattr(filter_module, "assess_relevance", spy)
+
+    result = await filter_module.filter_vacancy(
         _vacancy(work_format=WorkFormat.OFFICE), Criteria(work_formats=[WorkFormat.REMOTE])
     )
     assert result.passed is False
@@ -218,39 +220,42 @@ def test_ai_not_called_when_rules_reject(monkeypatch):
     assert result.score is None
 
 
-def test_ai_called_when_rules_pass(monkeypatch):
+async def test_ai_called_when_rules_pass(monkeypatch):
     import src.filters.filter as filter_module
     from src.filters.relevance import RelevanceResult, Score
 
-    monkeypatch.setattr(
-        filter_module,
-        "assess_relevance",
-        lambda v, c: RelevanceResult(score=Score.HIGH, reasoning="стек совпал"),
+    async def fake(vacancy, criteria):
+        return RelevanceResult(score=Score.HIGH, reasoning="стек совпал")
+
+    monkeypatch.setattr(filter_module, "assess_relevance", fake)
+    result = await filter_module.filter_vacancy(
+        _vacancy(work_format=WorkFormat.REMOTE), Criteria()
     )
-    result = filter_module.filter_vacancy(_vacancy(work_format=WorkFormat.REMOTE), Criteria())
     assert result.passed is True
     assert result.score is Score.HIGH
     assert result.reasoning == "стек совпал"
 
 
-def test_low_score_does_not_pass(monkeypatch):
+async def test_low_score_does_not_pass(monkeypatch):
     import src.filters.filter as filter_module
     from src.filters.relevance import RelevanceResult, Score
 
-    monkeypatch.setattr(
-        filter_module,
-        "assess_relevance",
-        lambda v, c: RelevanceResult(score=Score.LOW, reasoning="по сути мимо"),
-    )
-    result = filter_module.filter_vacancy(_vacancy(), Criteria())
+    async def fake(vacancy, criteria):
+        return RelevanceResult(score=Score.LOW, reasoning="по сути мимо")
+
+    monkeypatch.setattr(filter_module, "assess_relevance", fake)
+    result = await filter_module.filter_vacancy(_vacancy(), Criteria())
     assert result.passed is False
     assert result.score is Score.LOW
 
 
-def test_ai_failure_does_not_lose_vacancy(monkeypatch):
+async def test_ai_failure_does_not_lose_vacancy(monkeypatch):
     import src.filters.filter as filter_module
 
-    monkeypatch.setattr(filter_module, "assess_relevance", lambda v, c: None)
-    result = filter_module.filter_vacancy(_vacancy(), Criteria())
+    async def fake(vacancy, criteria):
+        return None
+
+    monkeypatch.setattr(filter_module, "assess_relevance", fake)
+    result = await filter_module.filter_vacancy(_vacancy(), Criteria())
     assert result.passed is True, "правила прошла — не теряем из-за ошибки API"
     assert result.score is None

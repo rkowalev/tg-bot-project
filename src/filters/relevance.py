@@ -55,15 +55,15 @@ STATS = _Stats()
 
 # TODO: клиент и его прогрев дублируют enrichment/enricher.py. Свести в общий
 # модуль, когда будет разрешено трогать enrichment (сейчас он вне scope).
-_client: anthropic.Anthropic | None = None
+_client: anthropic.AsyncAnthropic | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError("ANTHROPIC_API_KEY не найден в .env")
-        _client = anthropic.Anthropic()
+        _client = anthropic.AsyncAnthropic()
     return _client
 
 
@@ -131,14 +131,14 @@ def _user_prompt(vacancy: Vacancy) -> str:
 </post>"""
 
 
-def assess_relevance(vacancy: Vacancy, criteria: Criteria) -> RelevanceResult | None:
+async def assess_relevance(vacancy: Vacancy, criteria: Criteria) -> RelevanceResult | None:
     """
     Оценка релевантности. None — если вызов не удался (прогон не роняем,
     вакансию покажем без оценки, чем потеряем молча).
     """
     STATS.calls += 1
     try:
-        response = _get_client().messages.parse(
+        response = await _get_client().messages.parse(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             # ЗАМЕРЕНО: сейчас кэш тут НЕ работает. Префикс (схема ~750 +

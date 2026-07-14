@@ -15,6 +15,33 @@ from src.filters.criteria import Criteria
 from src.models.vacancy import Grade, Vacancy, WorkFormat
 
 
+def passes_prefilter(vacancy: Vacancy, criteria: Criteria) -> bool:
+    """
+    Отсев ДО обогащения — на данных одних регулярок. Экономит вызов ИИ.
+
+    Проверяем только формат работы и стек: их регулярки берут надёжно
+    (формат ~95%, стек по словарю). Зарплату и грейд здесь трогать НЕЛЬЗЯ —
+    именно их чинит ИИ (грейд у регулярок верен лишь в ~54% случаев), и отсев
+    по ним на сырых данных выкинул бы вакансии, которые обогащение исправило бы.
+
+    is_vacancy тоже не смотрим — его знает только ИИ, до обогащения он None.
+    """
+    if (
+        criteria.work_formats
+        and vacancy.work_format is not None
+        and vacancy.work_format is not WorkFormat.UNKNOWN
+        and vacancy.work_format not in criteria.work_formats
+    ):
+        return False
+
+    if criteria.stack_include and vacancy.stack:
+        wanted = {tech.lower() for tech in criteria.stack_include}
+        if not ({tech.lower() for tech in vacancy.stack} & wanted):
+            return False
+
+    return True
+
+
 def passes_hard_rules(vacancy: Vacancy, criteria: Criteria) -> tuple[bool, list[str]]:
     """
     Возвращает (прошёл, причины отказа). Причины — для отладки: видно, какое

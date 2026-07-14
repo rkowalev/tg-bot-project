@@ -29,8 +29,8 @@ async def main() -> None:
     flag_counts: Counter[str] = Counter()
     posts_seen = 0
 
-    async for raw_text, posted_at in iter_posts(LIMIT):
-        vacancy = parse_vacancy(raw_text, posted_at)
+    async for post in iter_posts(LIMIT):
+        vacancy = parse_vacancy(post.text, post.posted_at)
         posts_seen += 1
         # "additional_salary_fork: <текст>" у каждого поста свой — для частотной
         # таблицы считаем это одной категорией, а не кучей уникальных строк
