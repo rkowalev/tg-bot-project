@@ -24,7 +24,17 @@ from aiogram.types import (
 )
 
 from src.delivery.telegram_bot import format_message_from_row
-from src.profile import DocumentError, ResumeParseError, describe, extract_text, parse_resume
+from src.models.vacancy import WorkFormat
+from src.profile import (
+    DocumentError,
+    InputError,
+    ResumeParseError,
+    describe,
+    extract_text,
+    parse_languages,
+    parse_resume,
+    parse_salary,
+)
 from src.storage import (
     connect,
     count_unseen,
@@ -55,6 +65,11 @@ BATCH_LIMIT = 10
 class Onboarding(StatesGroup):
     waiting_resume = State()
     confirming = State()
+    # Правка полей прямо в боте. Нужна потому, что резюме отвечает не на все
+    # вопросы: зарплатных ожиданий в нём часто нет, а "Заново" перепарсит тот
+    # же текст и вернёт ту же пустоту.
+    editing_salary = State()
+    editing_languages = State()
 
 
 def main_keyboard(fetch_on: bool) -> ReplyKeyboardMarkup:
@@ -74,14 +89,38 @@ def main_keyboard(fetch_on: bool) -> ReplyKeyboardMarkup:
     )
 
 
-_CONFIRM = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Верно, сохранить", callback_data="crit_ok"),
-            InlineKeyboardButton(text="🔄 Заново", callback_data="crit_retry"),
-        ]
+_FORMAT_LABELS = {
+    WorkFormat.REMOTE: "удалёнка",
+    WorkFormat.HYBRID: "гибрид",
+    WorkFormat.OFFICE: "офис",
+}
+
+
+def _confirm_keyboard(criteria) -> InlineKeyboardMarkup:
+    """
+    Форматы — переключатели прямо в карточке: их всего три, отдельный экран
+    ради них избыточен. Зарплата и язык — свободный ввод, там нужен вопрос.
+    """
+    formats = [
+        InlineKeyboardButton(
+            text=f"{'✅' if fmt in criteria.work_formats else '⬜'} {label}",
+            callback_data=f"fmt_{fmt.value}",
+        )
+        for fmt, label in _FORMAT_LABELS.items()
     ]
-)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💰 Зарплата", callback_data="edit_salary"),
+                InlineKeyboardButton(text="🔤 Язык", callback_data="edit_languages"),
+            ],
+            formats,
+            [
+                InlineKeyboardButton(text="✅ Сохранить", callback_data="crit_ok"),
+                InlineKeyboardButton(text="🔄 Другое резюме", callback_data="crit_retry"),
+            ],
+        ]
+    )
 
 digest_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[[InlineKeyboardButton(text="Показать", callback_data="show_new")]]
@@ -161,17 +200,111 @@ async def got_resume(message: Message, state: FSMContext) -> None:
     # НЕ сохраняем молча — сначала показываем, что поняли
     await state.update_data(criteria=criteria.model_dump_json())
     await state.set_state(Onboarding.confirming)
-    await message.answer(
-        f"Понял так:\n\n{describe(criteria)}\n\nВсё верно?", reply_markup=_CONFIRM
+    await _show_card(message, criteria)
+
+
+def _card_text(criteria) -> str:
+    hint = ""
+    if criteria.min_salary is None:
+        # это главный пробел: в резюме зарплаты обычно нет, а критерий важный
+        hint = "\n\n⚠️ Зарплата не указана — без неё пропущу вакансии с любой вилкой."
+    return f"Понял так:\n\n{describe(criteria)}{hint}\n\nМожно поправить кнопками."
+
+
+async def _show_card(message: Message, criteria) -> None:
+    await message.answer(_card_text(criteria), reply_markup=_confirm_keyboard(criteria))
+
+
+async def _refresh_card(callback: CallbackQuery, criteria) -> None:
+    """Перерисовываем ту же карточку, а не плодим новые сообщения."""
+    await callback.message.edit_text(
+        _card_text(criteria), reply_markup=_confirm_keyboard(criteria)
     )
+
+
+async def _criteria_from_state(state: FSMContext):
+    from src.filters.criteria import Criteria
+
+    data = await state.get_data()
+    return Criteria.model_validate_json(data["criteria"])
+
+
+async def _store(state: FSMContext, criteria) -> None:
+    await state.update_data(criteria=criteria.model_dump_json())
+
+
+# ---------- правка полей ----------
+
+
+@router.callback_query(F.data == "edit_salary", Onboarding.confirming)
+async def ask_salary(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Onboarding.editing_salary)
+    await callback.message.answer(
+        "Напиши желаемую зарплату в месяц.\nНапример: <code>230</code> или "
+        "<code>230000</code>"
+    )
+    await callback.answer()
+
+
+@router.message(Onboarding.editing_salary)
+async def got_salary(message: Message, state: FSMContext) -> None:
+    try:
+        salary = parse_salary(message.text or "")
+    except InputError as error:
+        await message.answer(str(error))
+        return
+
+    criteria = await _criteria_from_state(state)
+    criteria.min_salary = salary
+    await _store(state, criteria)
+    await state.set_state(Onboarding.confirming)
+    await _show_card(message, criteria)
+
+
+@router.callback_query(F.data == "edit_languages", Onboarding.confirming)
+async def ask_languages(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Onboarding.editing_languages)
+    await callback.message.answer(
+        "Напиши языки, на которых готов работать, через запятую.\n"
+        "Например: <code>Python</code> или <code>Python, Go</code>\n\n"
+        "Вакансии на других языках буду отсекать."
+    )
+    await callback.answer()
+
+
+@router.message(Onboarding.editing_languages)
+async def got_languages(message: Message, state: FSMContext) -> None:
+    try:
+        languages = parse_languages(message.text or "")
+    except InputError as error:
+        await message.answer(str(error))
+        return
+
+    criteria = await _criteria_from_state(state)
+    criteria.languages = languages
+    await _store(state, criteria)
+    await state.set_state(Onboarding.confirming)
+    await _show_card(message, criteria)
+
+
+@router.callback_query(F.data.startswith("fmt_"), Onboarding.confirming)
+async def toggle_format(callback: CallbackQuery, state: FSMContext) -> None:
+    fmt = WorkFormat(callback.data.removeprefix("fmt_"))
+    criteria = await _criteria_from_state(state)
+
+    if fmt in criteria.work_formats:
+        criteria.work_formats = [f for f in criteria.work_formats if f is not fmt]
+    else:
+        criteria.work_formats = [*criteria.work_formats, fmt]
+
+    await _store(state, criteria)
+    await _refresh_card(callback, criteria)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "crit_ok", Onboarding.confirming)
 async def confirm_criteria(callback: CallbackQuery, state: FSMContext) -> None:
-    from src.filters.criteria import Criteria
-
-    data = await state.get_data()
-    criteria = Criteria.model_validate_json(data["criteria"])
+    criteria = await _criteria_from_state(state)
 
     conn = connect()
     try:

@@ -171,10 +171,18 @@ def _to_criteria(profile: ResumeProfile) -> Criteria:
     )
 
 
+_FORMAT_RU = {
+    WorkFormat.REMOTE: "удалёнка",
+    WorkFormat.HYBRID: "гибрид",
+    WorkFormat.OFFICE: "офис",
+    WorkFormat.UNKNOWN: "не указан",
+}
+
+
 def describe(criteria: Criteria) -> str:
     """Человекочитаемо — это показывают на подтверждении, а не model_dump."""
     languages = ", ".join(criteria.languages) or "не распознан"
-    formats = ", ".join(f.value for f in criteria.work_formats) or "любой"
+    formats = ", ".join(_FORMAT_RU[f] for f in criteria.work_formats) or "любой"
     tools = ", ".join(criteria.stack_include) or "не распознаны"
     salary = f"от {criteria.min_salary // 1000}к" if criteria.min_salary else "не указана"
     lines = [
