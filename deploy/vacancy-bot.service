@@ -1,0 +1,28 @@
+[Unit]
+Description=Vacancy Aggregator: бот, слушает кнопки
+# Нужна сеть: без неё aiogram упадёт на старте, а Restart закрутит рестарт-петлю
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vacancy-bot
+ExecStart=/opt/vacancy-bot/.venv/bin/python scripts/run_bot.py
+
+# Бот — долгоживущий процесс: любое падение (обрыв сети, 500 от Telegram)
+# должно поднимать его обратно, иначе кнопки молча перестанут работать, а
+# узнаешь ты об этом, только когда что-то нажмёшь.
+Restart=always
+RestartSec=10
+
+# Логи в journald: journalctl -u vacancy-bot -f
+StandardOutput=journal
+StandardError=journal
+
+# Машина не пустая — на ней XRay (VPN) и TorrServer. Пределы, чтобы бот при
+# утечке или всплеске не утянул за собой то, через что ты ходишь в Telegram.
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

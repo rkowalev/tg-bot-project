@@ -1,0 +1,20 @@
+[Unit]
+Description=Vacancy Aggregator: обход каналов (запускается таймером)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# oneshot: отработал и вышел, это не демон
+Type=oneshot
+WorkingDirectory=/opt/vacancy-bot
+ExecStart=/opt/vacancy-bot/.venv/bin/python scripts/daily_fetch.py
+
+# Отчёт скрипт пишет и сам (logs/daily_fetch.log), но journald даёт историю
+# запусков таймера: journalctl -u vacancy-fetch --since today
+StandardOutput=journal
+StandardError=journal
+
+# Обогащение держит до 10 запросов к ИИ в воздухе. 512 МБ хватает с запасом
+# (на 450 постах замерено), но XRay ронять нельзя ни при каких обстоятельствах.
+MemoryMax=512M
+CPUQuota=50%
