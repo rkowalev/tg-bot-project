@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -119,6 +120,32 @@ async def test_show_new_works_while_waiting_for_resume(routing):
 
     assert calls == ["unseen_vacancies"]
     assert state is None, "кнопка обязана погасить состояние, иначе съест следующий текст"
+
+
+async def test_stale_digest_button_still_shows_vacancies(monkeypatch):
+    """
+    Крон шлёт дайджест, даже когда бот не запущен. Нажатие ждёт в очереди
+    Telegram, и на протухшую query ответить уже нельзя — но вакансии обязаны
+    доехать, а не сгинуть вместе с ошибкой.
+    """
+    calls = []
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(
+        bot_ui, "unseen_vacancies", lambda conn: calls.append("unseen_vacancies") or []
+    )
+
+    async def stale_answer(*args, **kwargs):
+        raise TelegramBadRequest(method="answerCallbackQuery", message="query is too old")
+
+    callback = SimpleNamespace(
+        answer=stale_answer,
+        message=SimpleNamespace(answer=AsyncMock()),
+    )
+    state = AsyncMock()
+
+    await bot_ui.cb_show_new(callback, state)
+
+    assert calls == ["unseen_vacancies"], "протухшая кнопка не должна отменять показ"
 
 
 async def test_resume_text_still_reaches_parser(routing):

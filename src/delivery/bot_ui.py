@@ -8,9 +8,11 @@ UX бота: онбординг резюме (FSM) + клавиатура.
 Резюме парсится ТОЛЬКО на онбординге и обновлении — результат живёт в БД.
 """
 
+from contextlib import suppress
 from datetime import datetime, timedelta
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -385,7 +387,12 @@ async def btn_new(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "show_new")
 async def cb_show_new(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
+    # Дайджест уходит по крону, а бот живёт в открытом терминале — нажатие
+    # запросто пролежит в очереди Telegram, пока бота нет. На протухшую query
+    # ответить уже нельзя, но это лишь крутилка на кнопке: вакансии всё равно
+    # обязаны доехать, поэтому глушим ошибку, а не весь хендлер.
+    with suppress(TelegramBadRequest):
+        await callback.answer()
     await btn_new(callback.message, state)
 
 
