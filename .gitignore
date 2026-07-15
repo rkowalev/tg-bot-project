@@ -8,3 +8,4 @@ __pycache__/
 # репозиторий публичный. Нужны локально, в git им не место.
 scripts/parse_snapshot_*.txt
 logs/
+.fetch.lock

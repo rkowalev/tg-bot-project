@@ -1,13 +1,22 @@
 """
 UX бота: онбординг резюме (FSM) + клавиатура.
 
-Режим — pull с тихим дайджестом. Бот НЕ пушит вакансии по одной: раз в сутки
-крон присылает одно тихое «доступно N новых», всё остальное — по кнопке и
-мгновенно из БД. Ни одна кнопка показа не трогает Telethon и не зовёт ИИ.
+Режим — pull с тихим дайджестом. Бот НЕ пушит вакансии по одной: крон присылает
+одно тихое «доступно N новых», всё остальное — по кнопке.
+
+Кнопки делятся на два сорта, и это principial:
+  - ПОКАЗА (Показать новые, За сегодня/3 дня/неделю, Все вакансии) — только
+    читают БД. Мгновенно, ни Telethon, ни ИИ.
+  - ОБХОДА (Проверить сейчас) — единственная, что идёт в сеть. Под замком:
+    крон и бот делят один .session, одновременный обход = AUTH_KEY_DUPLICATED.
+
+Свести их в одну кнопку нельзя: после утреннего дайджеста обход вернул бы то
+же самое, а ждать пришлось бы.
 
 Резюме парсится ТОЛЬКО на онбординге и обновлении — результат живёт в БД.
 """
 
+import os
 from contextlib import suppress
 from datetime import datetime, timedelta
 
@@ -27,6 +36,7 @@ from aiogram.types import (
 
 from src.delivery.telegram_bot import format_message_from_row
 from src.models.vacancy import WorkFormat
+from src.pipeline import FetchBusy, fetch_lock, run_once
 from src.profile import (
     DocumentError,
     InputError,
@@ -54,6 +64,11 @@ from src.storage import (
 router = Router()
 
 BTN_NEW = "🆕 Показать новые"
+# Отдельно от BTN_NEW осознанно. Это РАЗНЫЕ операции: BTN_NEW отдаёт мгновенно
+# то, что уже нашли, BTN_FETCH идёт по каналам заново. Свести их в одну кнопку
+# значит заставить ждать обхода сразу после утреннего дайджеста — крон только
+# что сходил, и обход вернёт ровно то же самое.
+BTN_FETCH = "🔄 Проверить сейчас"
 BTN_TODAY = "За сегодня"
 BTN_3DAYS = "За 3 дня"
 BTN_WEEK = "За неделю"
@@ -69,6 +84,7 @@ BTN_RESUME_SEARCH = "▶️ Возобновить поиск"
 MENU_BUTTONS = frozenset(
     {
         BTN_NEW,
+        BTN_FETCH,
         BTN_TODAY,
         BTN_3DAYS,
         BTN_WEEK,
@@ -83,6 +99,10 @@ NOT_MENU_BUTTON = ~F.text.in_(MENU_BUTTONS)
 # Telegram не даст отправить 50 сообщений подряд — упрёмся в лимит и получим
 # 429. Показываем пачкой, остальное останется непоказанным до следующего раза.
 BATCH_LIMIT = 10
+
+# Сколько постов брать с канала при ручном обходе. Тот же LIMIT, что у крона:
+# иначе кнопка и расписание видели бы разную глубину канала.
+FETCH_LIMIT = int(os.environ.get("LIMIT", "50"))
 
 
 class Onboarding(StatesGroup):
@@ -100,7 +120,7 @@ def main_keyboard(fetch_on: bool) -> ReplyKeyboardMarkup:
     pause = KeyboardButton(text=BTN_PAUSE if fetch_on else BTN_RESUME_SEARCH)
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_NEW)],
+            [KeyboardButton(text=BTN_NEW), KeyboardButton(text=BTN_FETCH)],
             [
                 KeyboardButton(text=BTN_TODAY),
                 KeyboardButton(text=BTN_3DAYS),
@@ -470,6 +490,62 @@ async def btn_new(message: Message, state: FSMContext) -> None:
         await message.answer("Новых нет.")
         return
     await _send_rows(message, rows, mark_as_seen=True)
+
+
+# ---------- обход по требованию: единственная кнопка, которая ходит в сеть ----------
+
+
+@router.message(F.text == BTN_FETCH)
+async def btn_fetch_now(message: Message, state: FSMContext) -> None:
+    """
+    Ручной обход. Нужен между утренними прогонами: посмотрел вчерашние, написал
+    HR, а после обеда хочешь свежие — крон до завтра не проснётся.
+    """
+    await state.clear()
+    conn = connect()
+    try:
+        criteria = get_criteria(conn)
+        fetch_on = is_fetch_enabled(conn)
+        before = count_unseen(conn)
+    finally:
+        conn.close()
+
+    if criteria is None:
+        await message.answer("Сначала пришли резюме — жми /start")
+        return
+    if not fetch_on:
+        await message.answer(
+            "Поиск на паузе. Возобнови его, если хочешь сходить по каналам.",
+            reply_markup=main_keyboard(False),
+        )
+        return
+
+    try:
+        # FetchBusy летит из __enter__, поэтому "Иду по каналам" не напечатается,
+        # если замок занят: сначала лезем за ним, потом обещаем.
+        with fetch_lock():
+            await message.answer(
+                "Иду по каналам. Обычно это меньше минуты — пришлю, как закончу."
+            )
+            # bot=None: конвейер только собирает в БД. Рассылку по одной вакансии
+            # не включаем — итог отдаём одним сообщением ниже.
+            await run_once(criteria, bot=None, limit=FETCH_LIMIT)
+    except FetchBusy:
+        # Крон проснулся в тот же момент или кнопку нажали дважды. Один
+        # .session на два одновременных обхода = AUTH_KEY_DUPLICATED.
+        await message.answer("Уже иду по каналам — подожди, пришлю как закончу.")
+        return
+
+    conn = connect()
+    try:
+        found = count_unseen(conn) - before
+    finally:
+        conn.close()
+
+    if found <= 0:
+        await message.answer("Новых нет — всё, что было, ты уже видел.")
+        return
+    await message.answer(f"Нашёл новых: {found}", reply_markup=digest_keyboard)
 
 
 @router.callback_query(F.data == "show_new")

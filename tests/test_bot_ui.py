@@ -149,6 +149,86 @@ async def test_stale_digest_button_still_shows_vacancies(monkeypatch):
     assert calls == ["unseen_vacancies"], "протухшая кнопка не должна отменять показ"
 
 
+# ---------- обход по кнопке ----------
+
+
+@pytest.fixture
+def fetching(monkeypatch):
+    """Конвейер подменён: сети в тестах нет. Возвращает, звали ли обход."""
+    calls = []
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(bot_ui, "get_criteria", lambda conn: Criteria())
+    monkeypatch.setattr(bot_ui, "is_fetch_enabled", lambda conn: True)
+    monkeypatch.setattr(bot_ui, "count_unseen", lambda conn: len(calls) and 3 or 0)
+
+    async def fake_run_once(criteria, bot=None, limit=None):
+        calls.append(limit)
+
+    monkeypatch.setattr(bot_ui, "run_once", fake_run_once)
+    return calls
+
+
+def _msg():
+    sent = []
+    return SimpleNamespace(
+        answer=AsyncMock(side_effect=lambda text, **kw: sent.append(text)), sent=sent
+    )
+
+
+async def test_fetch_button_runs_pipeline(fetching):
+    message = _msg()
+
+    await bot_ui.btn_fetch_now(message, AsyncMock())
+
+    assert fetching == [bot_ui.FETCH_LIMIT], "обход обязан сходить с тем же лимитом"
+    assert "Иду по каналам" in message.sent[0], "ожидание должно быть честно объявлено"
+
+
+async def test_fetch_button_reports_busy_and_skips_run(fetching):
+    """
+    Крон проснулся в тот же момент или нажали дважды. Второй обход НЕ должен
+    стартовать: один .session на два разом = AUTH_KEY_DUPLICATED.
+    """
+    message = _msg()
+
+    with bot_ui.fetch_lock():
+        await bot_ui.btn_fetch_now(message, AsyncMock())
+
+    assert fetching == [], "второй обход не должен был стартовать"
+    assert "Уже иду" in message.sent[0]
+    assert not any("Иду по каналам" in t for t in message.sent), (
+        "обещать обход, которого не будет, нельзя"
+    )
+
+
+async def test_fetch_button_respects_pause(fetching, monkeypatch):
+    """Пауза значит «не трогай каналы» — кнопка не исключение."""
+    monkeypatch.setattr(bot_ui, "is_fetch_enabled", lambda conn: False)
+    message = _msg()
+
+    await bot_ui.btn_fetch_now(message, AsyncMock())
+
+    assert fetching == []
+    assert "паузе" in message.sent[0]
+
+
+async def test_show_buttons_never_touch_network(routing, monkeypatch):
+    """
+    Кнопки показа обязаны остаться мгновенными. Обход в них = минута ожидания
+    там, где данные уже лежат в БД.
+    """
+    ran = []
+
+    async def boom(*args, **kwargs):
+        ran.append(1)
+
+    monkeypatch.setattr(bot_ui, "run_once", boom)
+
+    await routing(bot_ui.BTN_NEW)
+
+    assert ran == [], "кнопка показа сходила в сеть"
+
+
 # ---------- архив и правка критериев ----------
 
 
