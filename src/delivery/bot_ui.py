@@ -40,12 +40,14 @@ from src.profile import (
 from src.storage import (
     connect,
     count_unseen,
+    count_vacancies,
     get_criteria,
     is_fetch_enabled,
     mark_seen_vacancy,
     save_criteria,
     set_fetch_enabled,
     unseen_vacancies,
+    vacancies_page,
     vacancies_since,
 )
 
@@ -55,7 +57,8 @@ BTN_NEW = "🆕 Показать новые"
 BTN_TODAY = "За сегодня"
 BTN_3DAYS = "За 3 дня"
 BTN_WEEK = "За неделю"
-BTN_RESUME = "📄 Обновить резюме"
+BTN_ALL = "📋 Все вакансии"
+BTN_CRITERIA = "⚙️ Критерии"
 BTN_PAUSE = "⏸ Остановить поиск"
 BTN_RESUME_SEARCH = "▶️ Возобновить поиск"
 
@@ -64,7 +67,16 @@ BTN_RESUME_SEARCH = "▶️ Возобновить поиск"
 # waiting_resume уезжало в парсер резюме. Состояния текст кнопок пропускают,
 # кнопки — гасят состояние.
 MENU_BUTTONS = frozenset(
-    {BTN_NEW, BTN_TODAY, BTN_3DAYS, BTN_WEEK, BTN_RESUME, BTN_PAUSE, BTN_RESUME_SEARCH}
+    {
+        BTN_NEW,
+        BTN_TODAY,
+        BTN_3DAYS,
+        BTN_WEEK,
+        BTN_ALL,
+        BTN_CRITERIA,
+        BTN_PAUSE,
+        BTN_RESUME_SEARCH,
+    }
 )
 NOT_MENU_BUTTON = ~F.text.in_(MENU_BUTTONS)
 
@@ -94,7 +106,8 @@ def main_keyboard(fetch_on: bool) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=BTN_3DAYS),
                 KeyboardButton(text=BTN_WEEK),
             ],
-            [KeyboardButton(text=BTN_RESUME), pause],
+            [KeyboardButton(text=BTN_ALL)],
+            [KeyboardButton(text=BTN_CRITERIA), pause],
         ],
         resize_keyboard=True,
     )
@@ -167,10 +180,72 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         conn.close()
 
 
-@router.message(F.text == BTN_RESUME)
-async def btn_update_resume(message: Message, state: FSMContext) -> None:
+def _criteria_menu() -> InlineKeyboardMarkup:
+    """
+    Резюме — не единственный способ поменять критерии. Поправить формат или
+    порог зарплаты через перезаливку резюме нельзя в принципе: этих полей в
+    резюме нет, парсер вернёт ту же пустоту.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Поправить текущие", callback_data="crit_edit")],
+            [
+                InlineKeyboardButton(
+                    text="📄 Загрузить новое резюме", callback_data="crit_new"
+                )
+            ],
+        ]
+    )
+
+
+@router.message(F.text == BTN_CRITERIA)
+async def btn_criteria(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    conn = connect()
+    try:
+        criteria = get_criteria(conn)
+    finally:
+        conn.close()
+
+    if criteria is None:
+        # править нечего — сразу за резюме
+        await state.set_state(Onboarding.waiting_resume)
+        await message.answer(_ask_resume())
+        return
+
+    await message.answer(
+        f"Сейчас ищу так:\n\n{describe(criteria)}", reply_markup=_criteria_menu()
+    )
+
+
+@router.callback_query(F.data == "crit_edit")
+async def cb_criteria_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """Критерии из БД -> та же карточка, что и после разбора резюме."""
+    with suppress(TelegramBadRequest):
+        await callback.answer()
+
+    conn = connect()
+    try:
+        criteria = get_criteria(conn)
+    finally:
+        conn.close()
+
+    if criteria is None:
+        await state.set_state(Onboarding.waiting_resume)
+        await callback.message.answer(_ask_resume())
+        return
+
+    await _store(state, criteria)
+    await state.set_state(Onboarding.confirming)
+    await _show_card(callback.message, criteria)
+
+
+@router.callback_query(F.data == "crit_new")
+async def cb_criteria_new_resume(callback: CallbackQuery, state: FSMContext) -> None:
+    with suppress(TelegramBadRequest):
+        await callback.answer()
     await state.set_state(Onboarding.waiting_resume)
-    await message.answer(_ask_resume())
+    await callback.message.answer(_ask_resume())
 
 
 # Резюме с hh.ru весит пару сотен КБ. Всё, что сильно больше, — не резюме,
@@ -220,7 +295,9 @@ def _card_text(criteria) -> str:
     if criteria.min_salary is None:
         # это главный пробел: в резюме зарплаты обычно нет, а критерий важный
         hint = "\n\n⚠️ Зарплата не указана — без неё пропущу вакансии с любой вилкой."
-    return f"Понял так:\n\n{describe(criteria)}{hint}\n\nМожно поправить кнопками."
+    # Заголовок нейтральный: карточка открывается и после разбора резюме, и по
+    # кнопке правки критериев.
+    return f"Ищу так:\n\n{describe(criteria)}{hint}\n\nМожно поправить кнопками."
 
 
 async def _show_card(message: Message, criteria) -> None:
@@ -366,9 +443,19 @@ async def _send_rows(message: Message, rows: list, mark_as_seen: bool) -> None:
             conn.close()
 
     if len(rows) > BATCH_LIMIT:
-        await message.answer(
-            f"Показал {BATCH_LIMIT} из {len(rows)}. Нажми ещё раз, чтобы увидеть остальные."
-        )
+        if mark_as_seen:
+            # показанное помечено -> следующее нажатие отдаст следующую пачку
+            await message.answer(
+                f"Показал {BATCH_LIMIT} из {len(rows)}. "
+                "Нажми ещё раз, чтобы увидеть остальные."
+            )
+        else:
+            # срез по дате seen не трогает: повторное нажатие вернёт ТЕ ЖЕ 10,
+            # обещать «остальные» тут нельзя — за ними в «Все вакансии».
+            await message.answer(
+                f"Показал {BATCH_LIMIT} из {len(rows)}, свежие сверху. "
+                f"Остальные — в «{BTN_ALL}»."
+            )
 
 
 @router.message(F.text == BTN_NEW)
@@ -394,6 +481,88 @@ async def cb_show_new(callback: CallbackQuery, state: FSMContext) -> None:
     with suppress(TelegramBadRequest):
         await callback.answer()
     await btn_new(callback.message, state)
+
+
+# ---------- архив: всё, что есть, включая показанное и старое ----------
+
+
+def _all_filter_keyboard(high: int, total: int) -> InlineKeyboardMarkup:
+    """low в БД не попадает, поэтому выбор ровно один: только high или всё."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🟢 Только high ({high})", callback_data="all:high:0"
+                ),
+                InlineKeyboardButton(text=f"📋 Все ({total})", callback_data="all:any:0"),
+            ]
+        ]
+    )
+
+
+@router.message(F.text == BTN_ALL)
+async def btn_all(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    conn = connect()
+    try:
+        total = count_vacancies(conn)
+        high = count_vacancies(conn, score="high")
+    finally:
+        conn.close()
+
+    if not total:
+        await message.answer("В базе пока пусто.")
+        return
+
+    await message.answer("Что показать?", reply_markup=_all_filter_keyboard(high, total))
+
+
+@router.callback_query(F.data.startswith("all:"))
+async def cb_all_page(callback: CallbackQuery) -> None:
+    """
+    Архив листается через offset в callback_data: состояние тут не нужно и
+    только мешало бы — кнопка «Показать ещё» должна работать и через сутки.
+    """
+    with suppress(TelegramBadRequest):
+        await callback.answer()
+
+    _, score_key, raw_offset = callback.data.split(":")
+    score = None if score_key == "any" else score_key
+    offset = int(raw_offset)
+
+    conn = connect()
+    try:
+        rows = vacancies_page(conn, score=score, limit=BATCH_LIMIT, offset=offset)
+        total = count_vacancies(conn, score=score)
+    finally:
+        conn.close()
+
+    if not rows:
+        await callback.message.answer("Ничего нет.")
+        return
+
+    # seen не трогаем: архив — это просмотр, а не выдача новых
+    for row in rows:
+        text = row["message"] or format_message_from_row(row)
+        await callback.message.answer(text, disable_web_page_preview=True)
+
+    shown = offset + len(rows)
+    if shown < total:
+        await callback.message.answer(
+            f"Показал {shown} из {total}.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Показать ещё",
+                            callback_data=f"all:{score_key}:{shown}",
+                        )
+                    ]
+                ]
+            ),
+        )
+    else:
+        await callback.message.answer(f"Это всё: {total}.")
 
 
 async def _show_period(

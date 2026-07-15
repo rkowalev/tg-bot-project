@@ -2,6 +2,7 @@ from src.storage.db import (
     connect,
     content_hash,
     count_unseen,
+    count_vacancies,
     exists,
     get_criteria,
     get_last_fetch_at,
@@ -19,6 +20,7 @@ from src.storage.db import (
     set_setting,
     touch_last_fetch,
     unseen_vacancies,
+    vacancies_page,
     vacancies_since,
 )
 
@@ -26,6 +28,7 @@ __all__ = [
     "connect",
     "content_hash",
     "count_unseen",
+    "count_vacancies",
     "exists",
     "get_criteria",
     "get_last_fetch_at",
@@ -43,5 +46,6 @@ __all__ = [
     "set_setting",
     "touch_last_fetch",
     "unseen_vacancies",
+    "vacancies_page",
     "vacancies_since",
 ]

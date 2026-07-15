@@ -21,6 +21,7 @@ from aiogram.types import Chat, Message, Update, User
 from src.delivery import bot_ui
 from src.delivery.bot_ui import MENU_BUTTONS, NOT_MENU_BUTTON, main_keyboard
 from src.filters.criteria import Criteria
+from src.models.vacancy import WorkFormat
 
 BOT_ID = 42
 
@@ -146,6 +147,119 @@ async def test_stale_digest_button_still_shows_vacancies(monkeypatch):
     await bot_ui.cb_show_new(callback, state)
 
     assert calls == ["unseen_vacancies"], "протухшая кнопка не должна отменять показ"
+
+
+# ---------- архив и правка критериев ----------
+
+
+def _row(title, score="medium"):
+    return {"message": f"карточка: {title}", "content_hash": title, "score": score}
+
+
+async def test_criteria_edit_reuses_card_without_resume(monkeypatch):
+    """
+    Ради этого всё и делалось: поправить формат раньше можно было только
+    перезаливкой резюме, хотя формата в резюме нет вообще.
+    """
+    criteria = Criteria(work_formats=[WorkFormat.REMOTE, WorkFormat.HYBRID])
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(bot_ui, "get_criteria", lambda conn: criteria)
+    parse = AsyncMock()
+    monkeypatch.setattr(bot_ui, "parse_resume", parse)
+
+    answers = []
+    callback = SimpleNamespace(
+        answer=AsyncMock(),
+        message=SimpleNamespace(answer=AsyncMock(side_effect=lambda *a, **k: answers.append(a))),
+    )
+    state = AsyncMock()
+
+    await bot_ui.cb_criteria_edit(callback, state)
+
+    parse.assert_not_awaited()  # резюме перечитывать не должны
+    state.set_state.assert_awaited_with(bot_ui.Onboarding.confirming)
+    assert "удалёнка" in answers[0][0], "в карточке должны быть текущие критерии"
+
+
+async def test_criteria_menu_offers_both_ways(monkeypatch):
+    """Кнопка больше не гонит за резюме силой — предлагает выбор."""
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(bot_ui, "get_criteria", lambda conn: Criteria())
+    sent = {}
+    message = SimpleNamespace(
+        answer=AsyncMock(side_effect=lambda text, **kw: sent.update(kw))
+    )
+
+    await bot_ui.btn_criteria(message, AsyncMock())
+
+    labels = [b.text for row in sent["reply_markup"].inline_keyboard for b in row]
+    assert any("Поправить" in x for x in labels)
+    assert any("резюме" in x for x in labels)
+
+
+async def test_archive_shows_seen_and_old(monkeypatch):
+    """Архив не смотрит ни на seen_at, ни на возраст — иначе он бесполезен."""
+    asked = {}
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(bot_ui, "count_vacancies", lambda conn, score=None: 3)
+    monkeypatch.setattr(
+        bot_ui,
+        "vacancies_page",
+        lambda conn, score=None, limit=10, offset=0: asked.update(
+            score=score, offset=offset
+        )
+        or [_row("старая, уже показанная")],
+    )
+    callback = SimpleNamespace(
+        answer=AsyncMock(), data="all:any:0", message=SimpleNamespace(answer=AsyncMock())
+    )
+
+    await bot_ui.cb_all_page(callback)
+
+    assert asked == {"score": None, "offset": 0}
+
+
+async def test_archive_filters_by_high(monkeypatch):
+    asked = {}
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(bot_ui, "count_vacancies", lambda conn, score=None: 1)
+    monkeypatch.setattr(
+        bot_ui,
+        "vacancies_page",
+        lambda conn, score=None, limit=10, offset=0: asked.update(score=score)
+        or [_row("хай", "high")],
+    )
+    callback = SimpleNamespace(
+        answer=AsyncMock(), data="all:high:0", message=SimpleNamespace(answer=AsyncMock())
+    )
+
+    await bot_ui.cb_all_page(callback)
+
+    assert asked == {"score": "high"}
+
+
+async def test_archive_paging_offsets_forward(monkeypatch):
+    """«Показать ещё» обязана вести на следующую пачку, а не на ту же."""
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(bot_ui, "count_vacancies", lambda conn, score=None: 25)
+    monkeypatch.setattr(
+        bot_ui,
+        "vacancies_page",
+        lambda conn, score=None, limit=10, offset=0: [_row(f"v{i}") for i in range(10)],
+    )
+    sent = []
+    callback = SimpleNamespace(
+        answer=AsyncMock(),
+        data="all:any:10",
+        message=SimpleNamespace(answer=AsyncMock(side_effect=lambda text, **kw: sent.append((text, kw)))),
+    )
+
+    await bot_ui.cb_all_page(callback)
+
+    tail_text, tail_kw = sent[-1]
+    assert "20 из 25" in tail_text
+    next_button = tail_kw["reply_markup"].inline_keyboard[0][0]
+    assert next_button.callback_data == "all:any:20"
 
 
 async def test_resume_text_still_reaches_parser(routing):

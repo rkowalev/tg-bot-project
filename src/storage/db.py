@@ -281,6 +281,38 @@ def vacancies_since(conn: sqlite3.Connection, since: datetime) -> list[sqlite3.R
     ).fetchall()
 
 
+def count_vacancies(conn: sqlite3.Connection, score: str | None = None) -> int:
+    """score=None — все. В базе живут только high и medium: low до неё не доходит."""
+    if score is None:
+        return conn.execute("SELECT COUNT(*) AS n FROM vacancies").fetchone()["n"]
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM vacancies WHERE score = ?", (score,)
+    ).fetchone()["n"]
+
+
+def vacancies_page(
+    conn: sqlite3.Connection,
+    score: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
+) -> list[sqlite3.Row]:
+    """
+    Архив: всё, что есть, независимо от seen_at и возраста поста.
+    Без этого показанная вакансия старше недели недостижима из бота — в БД
+    лежит, а показать нечем.
+    """
+    if score is None:
+        return conn.execute(
+            "SELECT * FROM vacancies ORDER BY posted_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM vacancies WHERE score = ? ORDER BY posted_at DESC "
+        "LIMIT ? OFFSET ?",
+        (score, limit, offset),
+    ).fetchall()
+
+
 def mark_seen_vacancy(conn: sqlite3.Connection, hash_value: str) -> None:
     conn.execute(
         "UPDATE vacancies SET seen_at = ? WHERE content_hash = ? AND seen_at IS NULL",
