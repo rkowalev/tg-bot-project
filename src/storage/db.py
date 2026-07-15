@@ -21,6 +21,7 @@
 """
 
 import hashlib
+import json
 import re
 import sqlite3
 from datetime import datetime
@@ -53,7 +54,10 @@ CREATE TABLE IF NOT EXISTS vacancies (
     posted_at    TEXT,
     message      TEXT,
     delivered_at TEXT,
-    seen_at      TEXT
+    seen_at      TEXT,
+    -- под какими критериями вакансию оценивали. Без этого не отличить
+    -- протухшую запись от свежей, и переоценка платит ИИ за все подряд.
+    criteria_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -64,7 +68,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 # Колонки, доехавшие позже создания таблицы. CREATE TABLE IF NOT EXISTS их не
 # добавит — существующую БД надо мигрировать явно.
-_LATE_COLUMNS = {"message": "TEXT", "seen_at": "TEXT"}
+_LATE_COLUMNS = {"message": "TEXT", "seen_at": "TEXT", "criteria_hash": "TEXT"}
 
 _WHITESPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s]")
@@ -162,6 +166,27 @@ def pending_deliveries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def criteria_fingerprint(criteria) -> str:
+    """
+    Отпечаток критериев, под которыми оценивали вакансию.
+
+    Берём только поля, влияющие на отбор: инструменты мягкие, на решение не
+    влияют — их правка не должна тянуть за собой платную переоценку.
+    """
+    payload = json.dumps(
+        {
+            "languages": sorted(criteria.languages),
+            "min_salary": criteria.min_salary,
+            "work_formats": sorted(f.value for f in criteria.work_formats),
+            "grades": sorted(g.value for g in criteria.grades),
+            "stack_exclude": sorted(criteria.stack_exclude),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
 def save_vacancy(
     conn: sqlite3.Connection,
     *,
@@ -173,6 +198,7 @@ def save_vacancy(
     reasoning: str | None,
     link: str,
     message: str,
+    criteria_hash: str | None = None,
 ) -> None:
     """
     Сохраняем ВСЕГДА с delivered_at=NULL — это постановка в очередь.
@@ -182,8 +208,8 @@ def save_vacancy(
     conn.execute(
         "INSERT OR IGNORE INTO vacancies (content_hash, channel, message_id, title, "
         "company, grade, work_format, salary_min, salary_max, contact, score, "
-        "reasoning, link, posted_at, message, delivered_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+        "reasoning, link, posted_at, message, delivered_at, criteria_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
         (
             hash_value,
             channel,
@@ -200,8 +226,57 @@ def save_vacancy(
             link,
             vacancy.posted_at.isoformat(),
             message,
+            criteria_hash,
         ),
     )
+
+
+def reassess_vacancy(
+    conn: sqlite3.Connection,
+    *,
+    hash_value: str,
+    vacancy,
+    score: str | None,
+    reasoning: str | None,
+    message: str,
+    criteria_hash: str,
+) -> None:
+    """Переоценка: обновляем вердикт и разобранные поля, seen_at не трогаем."""
+    conn.execute(
+        "UPDATE vacancies SET title=?, company=?, grade=?, work_format=?, "
+        "salary_min=?, salary_max=?, contact=?, score=?, reasoning=?, message=?, "
+        "criteria_hash=? WHERE content_hash=?",
+        (
+            vacancy.title,
+            vacancy.company,
+            vacancy.grade.value if vacancy.grade else None,
+            vacancy.work_format.value if vacancy.work_format else None,
+            vacancy.salary.min_value if vacancy.salary else None,
+            vacancy.salary.max_value if vacancy.salary else None,
+            vacancy.contact,
+            score,
+            reasoning,
+            message,
+            criteria_hash,
+            hash_value,
+        ),
+    )
+
+
+def drop_vacancy(conn: sqlite3.Connection, hash_value: str) -> None:
+    """Вакансия больше не проходит критерии — из архива её убираем."""
+    conn.execute("DELETE FROM vacancies WHERE content_hash = ?", (hash_value,))
+
+
+def stale_vacancies(
+    conn: sqlite3.Connection, criteria_hash: str
+) -> list[sqlite3.Row]:
+    """Оценённые под другими критериями (или до появления отпечатка)."""
+    return conn.execute(
+        "SELECT * FROM vacancies WHERE criteria_hash IS NULL OR criteria_hash != ? "
+        "ORDER BY posted_at",
+        (criteria_hash,),
+    ).fetchall()
 
 
 def mark_delivered(conn: sqlite3.Connection, hash_value: str) -> None:

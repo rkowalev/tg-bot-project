@@ -41,6 +41,7 @@ from src.sources.telegram import RawPost, iter_posts
 from src.storage import (
     connect,
     content_hash,
+    criteria_fingerprint,
     is_delivered,
     mark_delivered,
     mark_seen,
@@ -249,6 +250,9 @@ async def run_once(
                 reasoning=result.reasoning,
                 link=post.link,
                 message=format_message(vacancy, result, post.link),
+                # под какими критериями оценили — чтобы потом было видно,
+                # какие записи протухли после их смены
+                criteria_hash=criteria_fingerprint(criteria),
             )
             conn.commit()
 
