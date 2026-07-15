@@ -303,6 +303,32 @@ async def test_low_score_does_not_pass(monkeypatch):
     assert result.score is Score.LOW
 
 
+async def test_no_data_score_still_passes(monkeypatch):
+    """
+    Пост-заглушка ("должность + ссылка") — это "не знаем", а не "не подходит".
+    За ссылкой может оказаться отличная вакансия, поэтому в выдачу идёт.
+    """
+    import src.filters.filter as filter_module
+    from src.filters.relevance import RelevanceResult, Score
+
+    async def fake(vacancy, criteria):
+        return RelevanceResult(score=Score.NO_DATA, reasoning="в посте только ссылка")
+
+    monkeypatch.setattr(filter_module, "assess_relevance", fake)
+    result = await filter_module.filter_vacancy(_vacancy(), Criteria())
+
+    assert result.passed is True, "заглушку не теряем — решать по ссылке"
+    assert result.score is Score.NO_DATA
+
+
+def test_no_data_badge_differs_from_medium():
+    """В выдаче заглушку надо отличать от «спорно» с одного взгляда."""
+    from src.delivery.telegram_bot import _SCORE_BADGE
+
+    assert _SCORE_BADGE["no_data"] != _SCORE_BADGE["medium"]
+    assert set(_SCORE_BADGE) == {"high", "medium", "low", "no_data"}
+
+
 async def test_ai_failure_does_not_lose_vacancy(monkeypatch):
     import src.filters.filter as filter_module
 

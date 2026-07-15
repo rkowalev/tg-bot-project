@@ -29,7 +29,13 @@ load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
-_SCORE_BADGE = {"high": "🟢 HIGH", "medium": "🟡 MEDIUM", "low": "⚪️ LOW"}
+_SCORE_BADGE = {
+    "high": "🟢 HIGH",
+    "medium": "🟡 MEDIUM",
+    "low": "⚪️ LOW",
+    # пост-заглушка: решать по ссылке, а не по описанию
+    "no_data": "🔗 НЕТ ОПИСАНИЯ",
+}
 
 # Сводку читает человек по-русски — enum'ы наружу не показываем.
 _FORMAT_RU = {

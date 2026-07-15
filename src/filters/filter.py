@@ -31,7 +31,10 @@ async def filter_vacancy(vacancy: Vacancy, criteria: Criteria) -> FilterResult:
         # без оценки, а не выкинем молча
         return FilterResult(passed=True, reasoning="оценка не удалась (ошибка API)")
 
-    # low = правила пропустили, но по сути мимо -> в выдачу не идёт
+    # low = правила пропустили, но по сути мимо -> в выдачу не идёт.
+    # no_data проходит ОСОЗНАННО: пост-заглушка это "не знаем", а не "не
+    # подходит", и за ссылкой вполне может быть отличная вакансия. В карточке
+    # он помечен отдельным бейджем, так что с medium не спутать.
     return FilterResult(
         passed=assessment.score is not Score.LOW,
         score=assessment.score,
