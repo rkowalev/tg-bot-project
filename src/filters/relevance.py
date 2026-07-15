@@ -140,12 +140,16 @@ reasoning: одно-два предложения, конкретно, со сс
 
 def _user_prompt(vacancy: Vacancy) -> str:
     salary = "не указана"
-    if vacancy.salary and vacancy.salary.min_value:
+    # Критерий пользователя в рублях, значит и вилку показываем в рублях: увидев
+    # "2500 USD" рядом с порогом "230к руб", ИИ решит, что это мало. Исходную
+    # запись оставляем в скобках — она есть в тексте поста, врать про неё нельзя.
+    if vacancy.salary and vacancy.salary.min_rub:
         gross = {True: "гросс", False: "на руки", None: "?"}[vacancy.salary.gross]
-        salary = (
-            f"{vacancy.salary.min_value // 1000}-"
-            f"{(vacancy.salary.max_value or vacancy.salary.min_value) // 1000}к {gross}"
-        )
+        low = vacancy.salary.min_rub // 1000
+        high = (vacancy.salary.max_rub or vacancy.salary.min_rub) // 1000
+        salary = f"{low}-{high}к руб {gross}"
+        if vacancy.salary.currency and vacancy.salary.currency.upper() != "RUB":
+            salary += f" (в посте: {vacancy.salary.raw})"
     return f"""\
 Оцени вакансию.
 

@@ -57,11 +57,18 @@ def _salary_line(vacancy: Vacancy) -> str:
     if not vacancy.salary or vacancy.salary.min_value is None:
         return "не указана"
     gross = {True: "гросс", False: "на руки", None: ""}[vacancy.salary.gross]
-    low = vacancy.salary.min_value // 1000
-    high = (vacancy.salary.max_value or vacancy.salary.min_value) // 1000
+    # В рублях, потому что порог в рублях и глазом сравнивают с ним. Но исходную
+    # запись показываем рядом: "$2500" — это то, что реально написал работодатель,
+    # и по нему пойдёт разговор на собеседовании.
+    if vacancy.salary.min_rub is None:
+        return f"{vacancy.salary.raw} (валюта незнакомая, не пересчитал)"
+    low = vacancy.salary.min_rub // 1000
+    high = (vacancy.salary.max_rub or vacancy.salary.min_rub) // 1000
     span = f"{low}к" if low == high else f"{low}–{high}к"
     period = "/час" if vacancy.salary.period == "hour" else ""
     line = f"{span}{period} {gross}".strip()
+    if vacancy.salary.currency and vacancy.salary.currency.upper() != "RUB":
+        line += f" (в посте: {vacancy.salary.raw})"
     if vacancy.salary_alternatives:
         line += f" (ещё: {', '.join(vacancy.salary_alternatives)})"
     return line

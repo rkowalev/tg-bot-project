@@ -86,14 +86,17 @@ def passes_hard_rules(vacancy: Vacancy, criteria: Criteria) -> tuple[bool, list[
 def _salary_reasons(vacancy: Vacancy, criteria: Criteria) -> list[str]:
     if criteria.min_salary is None:
         return []
-    # зарплаты нет или числа не разобраны -> неизвестно, а не мало
-    if vacancy.salary is None or vacancy.salary.max_value is None:
+    # ТОЛЬКО через max_rub: порог в рублях, а 10% постов дают вилку в долларах.
+    # Сравнение сырого max_value отправило бы "2500 USD" (~200к) под порог 230к
+    # как "2500 рублей" — и вакансия вылетела бы молча. Незнакомая валюта даёт
+    # None, то есть "неизвестно", а неизвестное правилами не режем.
+    if vacancy.salary is None or vacancy.salary.max_rub is None:
         return []
     # сравниваем по верхней границе вилки: "160-210к" при пороге 200к проходит,
     # потому что договориться на 210 реально
-    if vacancy.salary.max_value < criteria.min_salary:
+    if vacancy.salary.max_rub < criteria.min_salary:
         return [
-            f"зарплата до {vacancy.salary.max_value // 1000}к "
+            f"зарплата до {vacancy.salary.max_rub // 1000}к "
             f"ниже порога {criteria.min_salary // 1000}к"
         ]
     return []

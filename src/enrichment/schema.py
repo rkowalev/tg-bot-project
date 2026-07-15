@@ -20,10 +20,17 @@ from src.models.vacancy import Grade
 
 class EnrichedSalary(BaseModel):
     min_value: int | None = Field(
-        description="Нижняя граница в рублях за период. 160к -> 160000. Если вилки нет, а есть одно число — оно и в min, и в max."
+        description="Нижняя граница В ВАЛЮТЕ ПОСТА за период. 160к -> 160000; "
+        '"2 500 $" -> 2500 (а не 2500000). Если вилки нет, а есть одно число — '
+        "оно и в min, и в max."
     )
-    max_value: int | None = Field(description="Верхняя граница в рублях за период.")
-    currency: str | None = Field(description='Код валюты: "RUB", "USD", "EUR".')
+    max_value: int | None = Field(
+        description="Верхняя граница в валюте поста за период."
+    )
+    currency: str | None = Field(
+        description='Код валюты ИЗ ПОСТА: "RUB", "USD", "EUR". Значка нет -> "RUB". '
+        "Значения выше — в этой валюте, пересчитывать в рубли не надо."
+    )
     gross: bool | None = Field(
         description="true = до вычета налогов (гросс), false = на руки (net/нетто). null, если в посте не сказано."
     )

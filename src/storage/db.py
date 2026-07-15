@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS vacancies (
     work_format  TEXT,
     salary_min   INTEGER,
     salary_max   INTEGER,
+    -- валюта поста: без неё постфактум не понять, 2500 это рубли или доллары
+    salary_currency TEXT,
     contact      TEXT,
     score        TEXT,
     reasoning    TEXT,
@@ -68,7 +70,12 @@ CREATE TABLE IF NOT EXISTS settings (
 
 # Колонки, доехавшие позже создания таблицы. CREATE TABLE IF NOT EXISTS их не
 # добавит — существующую БД надо мигрировать явно.
-_LATE_COLUMNS = {"message": "TEXT", "seen_at": "TEXT", "criteria_hash": "TEXT"}
+_LATE_COLUMNS = {
+    "message": "TEXT",
+    "seen_at": "TEXT",
+    "criteria_hash": "TEXT",
+    "salary_currency": "TEXT",
+}
 
 _WHITESPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s]")
@@ -207,9 +214,10 @@ def save_vacancy(
     """
     conn.execute(
         "INSERT OR IGNORE INTO vacancies (content_hash, channel, message_id, title, "
-        "company, grade, work_format, salary_min, salary_max, contact, score, "
-        "reasoning, link, posted_at, message, delivered_at, criteria_hash) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
+        "company, grade, work_format, salary_min, salary_max, salary_currency, "
+        "contact, score, reasoning, link, posted_at, message, delivered_at, "
+        "criteria_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
         (
             hash_value,
             channel,
@@ -220,6 +228,7 @@ def save_vacancy(
             vacancy.work_format.value if vacancy.work_format else None,
             vacancy.salary.min_value if vacancy.salary else None,
             vacancy.salary.max_value if vacancy.salary else None,
+            vacancy.salary.currency if vacancy.salary else None,
             vacancy.contact,
             score,
             reasoning,
@@ -244,7 +253,8 @@ def reassess_vacancy(
     """Переоценка: обновляем вердикт и разобранные поля, seen_at не трогаем."""
     conn.execute(
         "UPDATE vacancies SET title=?, company=?, grade=?, work_format=?, "
-        "salary_min=?, salary_max=?, contact=?, score=?, reasoning=?, message=?, "
+        "salary_min=?, salary_max=?, salary_currency=?, contact=?, score=?, "
+        "reasoning=?, message=?, "
         "criteria_hash=? WHERE content_hash=?",
         (
             vacancy.title,
@@ -253,6 +263,7 @@ def reassess_vacancy(
             vacancy.work_format.value if vacancy.work_format else None,
             vacancy.salary.min_value if vacancy.salary else None,
             vacancy.salary.max_value if vacancy.salary else None,
+            vacancy.salary.currency if vacancy.salary else None,
             vacancy.contact,
             score,
             reasoning,

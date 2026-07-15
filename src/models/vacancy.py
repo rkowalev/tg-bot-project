@@ -13,6 +13,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from config.currency import to_rub
+
 
 class WorkFormat(str, Enum):
     REMOTE = "remote"
@@ -30,12 +32,26 @@ class Grade(str, Enum):
 
 
 class Salary(BaseModel):
+    # min_value/max_value — в ИСХОДНОЙ валюте поста, как написано у автора.
+    # Для сравнений и показа берите min_rub/max_rub: они приводят к рублям.
     min_value: int | None = None
     max_value: int | None = None
     currency: str | None = None
     gross: bool | None = None
     period: str | None = None  # "month" / "hour" — на этой итерации почти всегда None
     raw: str  # исходный кусок текста, из которого разобрана зарплата
+
+    # Конвертация живёт СВОЙСТВОМ модели, а не в вызывающем коде: зарплату
+    # читают правило, промпт оценки и карточка. Забыть конвертировать хотя бы
+    # в одном месте — значит сравнить 2500 USD с порогом 230000 RUB и молча
+    # выкинуть вакансию. Свойство забыть нельзя.
+    @property
+    def min_rub(self) -> int | None:
+        return to_rub(self.min_value, self.currency)
+
+    @property
+    def max_rub(self) -> int | None:
+        return to_rub(self.max_value, self.currency)
 
 
 class Vacancy(BaseModel):
