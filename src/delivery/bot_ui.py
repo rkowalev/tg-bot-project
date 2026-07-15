@@ -57,6 +57,15 @@ BTN_RESUME = "📄 Обновить резюме"
 BTN_PAUSE = "⏸ Остановить поиск"
 BTN_RESUME_SEARCH = "▶️ Возобновить поиск"
 
+# Кнопки меню приходят обычным текстом. Хендлеры состояний зарегистрированы
+# раньше кнопочных и иначе съедали бы нажатие: "Показать новые" в состоянии
+# waiting_resume уезжало в парсер резюме. Состояния текст кнопок пропускают,
+# кнопки — гасят состояние.
+MENU_BUTTONS = frozenset(
+    {BTN_NEW, BTN_TODAY, BTN_3DAYS, BTN_WEEK, BTN_RESUME, BTN_PAUSE, BTN_RESUME_SEARCH}
+)
+NOT_MENU_BUTTON = ~F.text.in_(MENU_BUTTONS)
+
 # Telegram не даст отправить 50 сообщений подряд — упрёмся в лимит и получим
 # 429. Показываем пачкой, остальное останется непоказанным до следующего раза.
 BATCH_LIMIT = 10
@@ -147,6 +156,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             await state.set_state(Onboarding.waiting_resume)
             await message.answer(_ask_resume())
             return
+        await state.clear()
         await message.answer(
             f"Ищу по твоим критериям:\n\n{describe(criteria)}",
             reply_markup=main_keyboard(is_fetch_enabled(conn)),
@@ -184,7 +194,7 @@ async def _extract_text(message: Message) -> str | None:
         return None
 
 
-@router.message(Onboarding.waiting_resume)
+@router.message(Onboarding.waiting_resume, NOT_MENU_BUTTON)
 async def got_resume(message: Message, state: FSMContext) -> None:
     text = await _extract_text(message)
     if text is None:
@@ -246,7 +256,7 @@ async def ask_salary(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(Onboarding.editing_salary)
+@router.message(Onboarding.editing_salary, NOT_MENU_BUTTON)
 async def got_salary(message: Message, state: FSMContext) -> None:
     try:
         salary = parse_salary(message.text or "")
@@ -272,7 +282,7 @@ async def ask_languages(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(Onboarding.editing_languages)
+@router.message(Onboarding.editing_languages, NOT_MENU_BUTTON)
 async def got_languages(message: Message, state: FSMContext) -> None:
     try:
         languages = parse_languages(message.text or "")
@@ -360,7 +370,8 @@ async def _send_rows(message: Message, rows: list, mark_as_seen: bool) -> None:
 
 
 @router.message(F.text == BTN_NEW)
-async def btn_new(message: Message) -> None:
+async def btn_new(message: Message, state: FSMContext) -> None:
+    await state.clear()
     conn = connect()
     try:
         rows = unseen_vacancies(conn)
@@ -373,12 +384,15 @@ async def btn_new(message: Message) -> None:
 
 
 @router.callback_query(F.data == "show_new")
-async def cb_show_new(callback: CallbackQuery) -> None:
+async def cb_show_new(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await btn_new(callback.message)
+    await btn_new(callback.message, state)
 
 
-async def _show_period(message: Message, days: int, label: str) -> None:
+async def _show_period(
+    message: Message, state: FSMContext, days: int, label: str
+) -> None:
+    await state.clear()
     since = datetime.now() - timedelta(days=days)
     conn = connect()
     try:
@@ -394,25 +408,26 @@ async def _show_period(message: Message, days: int, label: str) -> None:
 
 
 @router.message(F.text == BTN_TODAY)
-async def btn_today(message: Message) -> None:
-    await _show_period(message, 1, "За сегодня")
+async def btn_today(message: Message, state: FSMContext) -> None:
+    await _show_period(message, state, 1, "За сегодня")
 
 
 @router.message(F.text == BTN_3DAYS)
-async def btn_3days(message: Message) -> None:
-    await _show_period(message, 3, "За 3 дня")
+async def btn_3days(message: Message, state: FSMContext) -> None:
+    await _show_period(message, state, 3, "За 3 дня")
 
 
 @router.message(F.text == BTN_WEEK)
-async def btn_week(message: Message) -> None:
-    await _show_period(message, 7, "За неделю")
+async def btn_week(message: Message, state: FSMContext) -> None:
+    await _show_period(message, state, 7, "За неделю")
 
 
 # ---------- пауза сбора ----------
 
 
 @router.message(F.text.in_({BTN_PAUSE, BTN_RESUME_SEARCH}))
-async def btn_toggle_fetch(message: Message) -> None:
+async def btn_toggle_fetch(message: Message, state: FSMContext) -> None:
+    await state.clear()
     conn = connect()
     try:
         new_state = not is_fetch_enabled(conn)
