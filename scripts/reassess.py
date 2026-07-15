@@ -13,9 +13,16 @@ Python ещё не было. Выглядит как баг фильтра, хо
 Берём ТОЛЬКО протухшие (criteria_hash != текущего): переоценивать свежие
 означало бы платить ИИ за уже известный ответ.
 
+Отпечаток следит за КРИТЕРИЯМИ, но не за промптом. Правка шкалы в
+relevance.py критерии не меняет — такие записи протухшими не считаются, и
+перетряхнуть их можно только руками, флагом --all. Вшивать версию промпта в
+отпечаток не стали: в разработке он правится часто, и каждая мелкая правка
+формулировки заставляла бы платить за переоценку всего архива.
+
 По умолчанию НИЧЕГО не пишет — показывает, что изменится. Писать: --apply
-    .venv/bin/python scripts/reassess.py
-    .venv/bin/python scripts/reassess.py --apply
+    .venv/bin/python scripts/reassess.py           # протухшие, просмотр
+    .venv/bin/python scripts/reassess.py --apply   # протухшие, записать
+    .venv/bin/python scripts/reassess.py --all --apply   # ВСЕ (правка промпта)
 """
 
 import asyncio
@@ -42,6 +49,7 @@ from src.storage import (  # noqa: E402
 )
 
 APPLY = "--apply" in sys.argv
+ALL = "--all" in sys.argv
 
 
 async def _fetch_posts(rows) -> dict[str, str]:
@@ -75,12 +83,16 @@ async def main() -> None:
             return
 
         fingerprint = criteria_fingerprint(criteria)
-        rows = stale_vacancies(conn, fingerprint)
+        if ALL:
+            rows = conn.execute("SELECT * FROM vacancies ORDER BY posted_at").fetchall()
+            print(f"--all: переоцениваю ВСЕ записи ({len(rows)})")
+        else:
+            rows = stale_vacancies(conn, fingerprint)
         if not rows:
             print("протухших записей нет — архив уже под текущими критериями")
             return
 
-        print(f"протухших записей: {len(rows)}; тяну исходники из Telegram…")
+        print(f"записей к переоценке: {len(rows)}; тяну исходники из Telegram…")
         texts = await _fetch_posts(rows)
         print(f"достал постов: {len(texts)} из {len(rows)}\n")
 
