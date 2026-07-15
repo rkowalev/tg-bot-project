@@ -14,9 +14,37 @@
 import asyncio
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+ROOT = Path(__file__).resolve().parent.parent
+LOG_PATH = ROOT / "logs" / "daily_fetch.log"
+
+
+class _Tee:
+    """
+    Отчёт идёт и в stdout, и в файл.
+
+    Под кроном stdout уходит в никуда: не придёт дайджест — и причину узнать
+    неоткуда. Пишем сами, а не надеемся на редирект в crontab, который легко
+    забыть. flush после каждой строки: иначе при падении посреди прогона лог
+    останется пустым, а это ровно тот случай, когда он и нужен.
+    """
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            stream.write(data)
+            stream.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
 
 from src.delivery import make_bot  # noqa: E402
 from src.delivery.bot_ui import digest_keyboard  # noqa: E402
@@ -84,4 +112,22 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    LOG_PATH.parent.mkdir(exist_ok=True)
+    with LOG_PATH.open("a", encoding="utf-8") as log_file:
+        sys.stdout = _Tee(sys.__stdout__, log_file)
+        print(f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} =====")
+        try:
+            asyncio.run(main())
+        except Exception:
+            # Падение обязано остаться в логе: под кроном traceback в stderr
+            # не увидит никто, а молчащий крон неотличим от «новых нет».
+            import traceback
+
+            traceback.print_exc(file=sys.stdout)
+            raise
+        finally:
+            # Вернуть stdout ОБЯЗАТЕЛЬНО: иначе он останется указывать на
+            # файл, который закроет with, и интерпретатор упадёт на выходе,
+            # пытаясь его сбросить. Работа при этом уже сделана — под кроном
+            # это выглядело бы как падение на ровном месте.
+            sys.stdout = sys.__stdout__

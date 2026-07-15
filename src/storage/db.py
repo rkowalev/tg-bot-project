@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS vacancies (
     message_id   INTEGER NOT NULL,
     title        TEXT,
     company      TEXT,
+    -- полный текст поста. Без него отладка и переоценка лезут в Telegram за
+    -- исходником: нужен .session, а он живёт в одном месте. С ним БД —
+    -- самодостаточный артефакт: скачал файл и воспроизвёл что угодно офлайн.
+    raw_text     TEXT,
     grade        TEXT,
     work_format  TEXT,
     salary_min   INTEGER,
@@ -75,6 +79,7 @@ _LATE_COLUMNS = {
     "seen_at": "TEXT",
     "criteria_hash": "TEXT",
     "salary_currency": "TEXT",
+    "raw_text": "TEXT",
 }
 
 _WHITESPACE = re.compile(r"\s+")
@@ -214,16 +219,17 @@ def save_vacancy(
     """
     conn.execute(
         "INSERT OR IGNORE INTO vacancies (content_hash, channel, message_id, title, "
-        "company, grade, work_format, salary_min, salary_max, salary_currency, "
-        "contact, score, reasoning, link, posted_at, message, delivered_at, "
-        "criteria_hash) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
+        "company, raw_text, grade, work_format, salary_min, salary_max, "
+        "salary_currency, contact, score, reasoning, link, posted_at, message, "
+        "delivered_at, criteria_hash) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
         (
             hash_value,
             channel,
             message_id,
             vacancy.title,
             vacancy.company,
+            vacancy.raw_text,
             vacancy.grade.value if vacancy.grade else None,
             vacancy.work_format.value if vacancy.work_format else None,
             vacancy.salary.min_value if vacancy.salary else None,
@@ -250,15 +256,22 @@ def reassess_vacancy(
     message: str,
     criteria_hash: str,
 ) -> None:
-    """Переоценка: обновляем вердикт и разобранные поля, seen_at не трогаем."""
+    """
+    Переоценка: обновляем вердикт и разобранные поля, seen_at не трогаем.
+
+    raw_text дописываем заодно: у старых записей его нет, и переоценка — это
+    ровно тот момент, когда исходник уже в руках. Так они вылечиваются сами и
+    второй раз в Telegram идти не придётся.
+    """
     conn.execute(
-        "UPDATE vacancies SET title=?, company=?, grade=?, work_format=?, "
+        "UPDATE vacancies SET title=?, company=?, raw_text=?, grade=?, work_format=?, "
         "salary_min=?, salary_max=?, salary_currency=?, contact=?, score=?, "
         "reasoning=?, message=?, "
         "criteria_hash=? WHERE content_hash=?",
         (
             vacancy.title,
             vacancy.company,
+            vacancy.raw_text,
             vacancy.grade.value if vacancy.grade else None,
             vacancy.work_format.value if vacancy.work_format else None,
             vacancy.salary.min_value if vacancy.salary else None,

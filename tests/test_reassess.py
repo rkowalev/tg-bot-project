@@ -153,3 +153,36 @@ def test_drop_removes_from_archive(conn):
     drop_vacancy(conn, "h1")
 
     assert conn.execute("SELECT COUNT(*) AS n FROM vacancies").fetchone()["n"] == 0
+
+
+# ---------- самодостаточность БД ----------
+
+
+def test_raw_text_is_stored(conn):
+    """
+    Исходник поста в БД = отладка и переоценка не ходят в Telegram. После
+    переезда на VPS это разница между «скачал файл» и «полез за .session».
+    """
+    _save(conn, "h1", None)
+
+    row = conn.execute("SELECT raw_text FROM vacancies WHERE content_hash='h1'").fetchone()
+    assert row["raw_text"] == "текст"
+
+
+def test_reassess_backfills_raw_text(conn):
+    """Старые записи без исходника вылечиваются на первой же переоценке."""
+    _save(conn, "h1", None)
+    conn.execute("UPDATE vacancies SET raw_text = NULL WHERE content_hash='h1'")
+
+    reassess_vacancy(
+        conn,
+        hash_value="h1",
+        vacancy=_vacancy(title="QA"),
+        score="high",
+        reasoning="ок",
+        message="карточка",
+        criteria_hash=criteria_fingerprint(Criteria()),
+    )
+
+    row = conn.execute("SELECT raw_text FROM vacancies WHERE content_hash='h1'").fetchone()
+    assert row["raw_text"] == "текст", "переоценка обязана дописать исходник"

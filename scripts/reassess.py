@@ -6,9 +6,10 @@
 160-210к и C# за 270к висели как medium с прогона, где порога 230к и жёсткого
 Python ещё не было. Выглядит как баг фильтра, хотя правила ни при чём.
 
-Почему нельзя переоценить по одной БД: там лежат только разобранные поля, а
-для правила про язык нужен стек, для ИИ — текст поста. Ни того ни другого мы
-не храним, поэтому исходники тянем из Telegram по channel + message_id.
+Исходники берём из БД (vacancies.raw_text) — сети не нужно. В Telegram лезем
+только за записями, сделанными ДО появления этой колонки: у них raw_text=NULL.
+Это важно после переезда на VPS: .session живёт в одном месте, а БД можно
+скачать и разбираться офлайн.
 
 Берём ТОЛЬКО протухшие (criteria_hash != текущего): переоценивать свежие
 означало бы платить ИИ за уже известный ответ.
@@ -53,12 +54,24 @@ ALL = "--all" in sys.argv
 
 
 async def _fetch_posts(rows) -> dict[str, str]:
-    """Исходные тексты постов по content_hash. Пост удалён -> ключа не будет."""
+    """
+    Исходные тексты по content_hash.
+
+    Сначала из БД. В Telegram идём только за теми, у кого raw_text=NULL —
+    это записи до появления колонки. Когда они кончатся, скрипт станет
+    полностью офлайновым.
+    """
+    texts = {r["content_hash"]: r["raw_text"] for r in rows if r["raw_text"]}
+    missing = [r for r in rows if not r["raw_text"]]
+    if not missing:
+        print(f"исходники: все {len(texts)} из БД, сеть не нужна")
+        return texts
+
+    print(f"исходники: {len(texts)} из БД, {len(missing)} тяну из Telegram (старые записи)")
     by_channel: dict[str, list] = {}
-    for row in rows:
+    for row in missing:
         by_channel.setdefault(row["channel"], []).append(row)
 
-    texts: dict[str, str] = {}
     client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
     await client.start()
     try:
