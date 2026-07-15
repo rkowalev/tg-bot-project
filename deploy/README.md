@@ -139,7 +139,7 @@ pkill -f scripts/run_bot.py
 | когда следующий обход | `systemctl list-timers vacancy-fetch` |
 | как прошёл обход | `journalctl -u vacancy-fetch --since today` |
 | отчёт обхода | `tail -30 /opt/vacancy-bot/logs/daily_fetch.log` |
-| обновить код | `cd /opt/vacancy-bot && git pull && systemctl restart vacancy-bot` |
+| обновить код | `ssh root@5.34.215.32 /opt/vacancy-bot/deploy/update.sh` |
 | забрать базу на ноут | `scp root@5.34.215.32:/opt/vacancy-bot/vacancies.db ./` |
 
 ## Грабли этого сервера
