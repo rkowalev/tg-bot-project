@@ -17,6 +17,7 @@ UX бота: онбординг резюме (FSM) + клавиатура.
 """
 
 import os
+import time
 from contextlib import suppress
 from datetime import datetime, timedelta
 
@@ -529,7 +530,17 @@ async def btn_fetch_now(message: Message, state: FSMContext) -> None:
             )
             # bot=None: конвейер только собирает в БД. Рассылку по одной вакансии
             # не включаем — итог отдаём одним сообщением ниже.
-            await run_once(criteria, bot=None, limit=FETCH_LIMIT)
+            started = time.perf_counter()
+            stats = await run_once(criteria, bot=None, limit=FETCH_LIMIT)
+            # В journald (StandardOutput=journal у юнита). Без этого обход по
+            # кнопке не оставлял НИКАКОГО следа: "новых нет" за две секунды
+            # выглядит одинаково и когда всё отработало, и когда не запускалось
+            # вовсе. Проверять такое по mtime файла замка — не дело.
+            print(
+                f"обход по кнопке за {time.perf_counter() - started:.1f} с\n"
+                f"{stats.report()}",
+                flush=True,
+            )
     except FetchBusy:
         # Крон проснулся в тот же момент или кнопку нажали дважды. Один
         # .session на два одновременных обхода = AUTH_KEY_DUPLICATED.

@@ -22,6 +22,7 @@ from src.delivery import bot_ui
 from src.delivery.bot_ui import MENU_BUTTONS, NOT_MENU_BUTTON, main_keyboard
 from src.filters.criteria import Criteria
 from src.models.vacancy import WorkFormat
+from src.pipeline import RunStats
 
 BOT_ID = 42
 
@@ -163,6 +164,7 @@ def fetching(monkeypatch):
 
     async def fake_run_once(criteria, bot=None, limit=None):
         calls.append(limit)
+        return RunStats()
 
     monkeypatch.setattr(bot_ui, "run_once", fake_run_once)
     return calls
