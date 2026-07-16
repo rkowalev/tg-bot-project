@@ -61,6 +61,14 @@ def test_every_keyboard_button_is_known(fetch_on):
 
 
 class _FakeConn:
+    """
+    Заглушка соединения. execute отдаёт пустой результат: хендлеры читают
+    settings (последний обход), и без этого падали бы на AttributeError.
+    """
+
+    def execute(self, *args, **kwargs):
+        return SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+
     def close(self):
         pass
 

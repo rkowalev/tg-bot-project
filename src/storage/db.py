@@ -24,7 +24,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "vacancies.db"
@@ -349,12 +349,39 @@ def set_fetch_enabled(conn: sqlite3.Connection, enabled: bool) -> None:
 
 
 def get_last_fetch_at(conn: sqlite3.Connection) -> datetime | None:
+    """
+    Когда последний раз ходили по каналам. Всегда aware.
+
+    Записи до появления пояса наивные — трактуем их как UTC: пишет их сервер,
+    а он живёт в UTC. Ошибиться тут значит показать пользователю время, по
+    которому он решит, что бот мёртв.
+    """
     raw = get_setting(conn, "last_fetch_at")
-    return datetime.fromisoformat(raw) if raw else None
+    if not raw:
+        return None
+    at = datetime.fromisoformat(raw)
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
 
 
-def touch_last_fetch(conn: sqlite3.Connection) -> None:
-    set_setting(conn, "last_fetch_at", datetime.now().isoformat(timespec="seconds"))
+def get_last_fetch_found(conn: sqlite3.Connection) -> int | None:
+    raw = get_setting(conn, "last_fetch_found")
+    return int(raw) if raw is not None else None
+
+
+def touch_last_fetch(conn: sqlite3.Connection, found: int = 0) -> None:
+    """
+    Отметка «обход был». Пишем В UTC С ПОЯСОМ: сервер в UTC, владелец в Москве,
+    и наивное время показало бы ему 04:02 вместо 07:02 — то есть выглядело бы
+    как пропущенный прогон.
+
+    found — сколько НОВЫХ вакансий этот обход добавил. Ноль тоже ценен: он
+    отличает «сходил и ничего не нашёл» от «не ходил вовсе», а по тишине в
+    боте эти два случая неразличимы.
+    """
+    set_setting(
+        conn, "last_fetch_at", datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
+    set_setting(conn, "last_fetch_found", str(found))
 
 
 # ---------- выборки для бота (всегда из БД, без сети) ----------

@@ -85,8 +85,10 @@ async def main() -> None:
 
     conn = connect()
     try:
-        touch_last_fetch(conn)
         unseen = count_unseen(conn)
+        # Сколько нашли — вместе с отметкой времени: ноль тоже ответ, он и
+        # отличает «сходил вхолостую» от «не запускался».
+        touch_last_fetch(conn, unseen - before)
     finally:
         conn.close()
 

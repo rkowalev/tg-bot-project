@@ -20,6 +20,7 @@ import os
 import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -53,10 +54,13 @@ from src.storage import (
     count_unseen,
     count_vacancies,
     get_criteria,
+    get_last_fetch_at,
+    get_last_fetch_found,
     is_fetch_enabled,
     mark_seen_vacancy,
     save_criteria,
     set_fetch_enabled,
+    touch_last_fetch,
     unseen_vacancies,
     vacancies_page,
     vacancies_since,
@@ -172,6 +176,42 @@ digest_keyboard = InlineKeyboardMarkup(
 )
 
 
+# Владелец в Москве, сервер в UTC. Показывать ему 04:02 вместо 07:02 — значит
+# заставить думать, что утренний прогон не сработал. Один пользователь, один
+# пояс — хардкод здесь честнее, чем настройка, которую некому менять.
+MOSCOW = ZoneInfo("Europe/Moscow")
+
+
+def _last_fetch_line(conn) -> str:
+    """
+    «Когда последний раз ходили и что нашли».
+
+    Без этой строчки тишина двусмысленна: «новых нет» выглядит одинаково и
+    когда обход отработал вхолостую, и когда он не запускался вовсе. Владелец
+    на это уже напоролся — ждал утренний дайджест, не получил и пошёл искать
+    поломку, которой не было.
+    """
+    at = get_last_fetch_at(conn)
+    if at is None:
+        return "Обхода ещё не было."
+
+    local = at.astimezone(MOSCOW)
+    today = datetime.now(MOSCOW).date()
+    days = (today - local.date()).days
+    if days == 0:
+        when = f"сегодня в {local:%H:%M}"
+    elif days == 1:
+        when = f"вчера в {local:%H:%M}"
+    else:
+        when = f"{local:%d.%m} в {local:%H:%M}"
+
+    found = get_last_fetch_found(conn)
+    if found is None:
+        return f"Последний обход: {when}."
+    tail = "новых не нашёл" if found == 0 else f"нашёл новых: {found}"
+    return f"Последний обход: {when}, {tail}."
+
+
 def _ask_resume() -> str:
     return (
         "Пришли своё резюме — текстом в сообщении или файлом (PDF, TXT)\n\n"
@@ -194,7 +234,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             return
         await state.clear()
         await message.answer(
-            f"Ищу по твоим критериям:\n\n{describe(criteria)}",
+            f"Ищу по твоим критериям:\n\n{describe(criteria)}"
+            f"\n\n{_last_fetch_line(conn)}",
             reply_markup=main_keyboard(is_fetch_enabled(conn)),
         )
     finally:
@@ -485,10 +526,14 @@ async def btn_new(message: Message, state: FSMContext) -> None:
     conn = connect()
     try:
         rows = unseen_vacancies(conn)
+        # читаем ДО закрытия соединения: строка нужна только в пустой ветке,
+        # но лезть в БД второй раз ради неё незачем
+        last_fetch = _last_fetch_line(conn)
     finally:
         conn.close()
     if not rows:
-        await message.answer("Новых нет.")
+        # Голое «Новых нет» неотличимо от «бот умер». Говорим, когда ходили.
+        await message.answer(f"Новых нет.\n\n{last_fetch}")
         return
     await _send_rows(message, rows, mark_as_seen=True)
 
@@ -550,6 +595,9 @@ async def btn_fetch_now(message: Message, state: FSMContext) -> None:
     conn = connect()
     try:
         found = count_unseen(conn) - before
+        # Отметку ставит и кнопка, а не только крон: иначе «последний обход»
+        # врал бы, что бот не ходил, хотя ты только что его гонял руками.
+        touch_last_fetch(conn, found)
     finally:
         conn.close()
 
