@@ -6,7 +6,7 @@
 состоянии waiting_resume уезжало в парсер резюме.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -229,6 +229,32 @@ async def test_show_buttons_never_touch_network(routing, monkeypatch):
     await routing(bot_ui.BTN_NEW)
 
     assert ran == [], "кнопка показа сходила в сеть"
+
+
+# ---------- окно срезов по дате ----------
+
+
+async def test_period_window_is_utc_not_local(monkeypatch):
+    """
+    posted_at приходит из Telethon с поясом (+00:00), а vacancies_since
+    сравнивает СТРОКАМИ. Наивное datetime.now() сдвигало окно на величину
+    пояса машины: на ноутбуке (МСК) «За сегодня» молча теряло посты за
+    последние 3 часа. На UTC-сервере совпало случайно — но зависеть от пояса
+    машины выборка не должна.
+    """
+    asked = {}
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(
+        bot_ui,
+        "vacancies_since",
+        lambda conn, since: asked.update(since=since) or [],
+    )
+
+    await bot_ui.btn_today(_msg(), AsyncMock())
+
+    since = asked["since"]
+    assert since.tzinfo is not None, "окно без пояса поедет вслед за поясом машины"
+    assert since.utcoffset() == timedelta(0), "posted_at в UTC — окно тоже в UTC"
 
 
 # ---------- архив и правка критериев ----------

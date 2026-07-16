@@ -19,7 +19,7 @@ UX бота: онбординг резюме (FSM) + клавиатура.
 import os
 import time
 from contextlib import suppress
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -656,7 +656,12 @@ async def _show_period(
     message: Message, state: FSMContext, days: int, label: str
 ) -> None:
     await state.clear()
-    since = datetime.now() - timedelta(days=days)
+    # UTC, а не now(): posted_at приходит из Telethon с поясом (+00:00), а
+    # vacancies_since сравнивает их СТРОКАМИ. Наивное локальное время сдвигало
+    # окно на величину пояса — на ноутбуке (МСК) "За сегодня" молча теряло
+    # посты за последние 3 часа. На UTC-сервере совпало случайно, но ставить
+    # это в зависимость от пояса машины нельзя.
+    since = datetime.now(timezone.utc) - timedelta(days=days)
     conn = connect()
     try:
         rows = vacancies_since(conn, since)
