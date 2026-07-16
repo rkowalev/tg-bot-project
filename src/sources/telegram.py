@@ -27,9 +27,6 @@ from telethon.tl.types import Channel
 
 load_dotenv()
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-
 
 def normalize_channel(name: str) -> str:
     """
@@ -51,6 +48,26 @@ CHANNELS = [
 ]
 
 SESSION_NAME = "explore"
+
+
+def make_client() -> TelegramClient:
+    """
+    Клиент Telethon. Единственное место, где он собирается.
+
+    Креды читаются ЗДЕСЬ, а не при импорте модуля. Раньше было
+    `API_ID = int(os.environ["API_ID"])` на уровне модуля — и любой импорт
+    требовал секретов. На чистой машине (свежий clone, CI) тесты из-за этого
+    не собирались вовсе: KeyError ловился ещё на сборе, до единой проверки.
+    Секреты нужны тому, кто реально идёт в Telegram, а не тому, кто импортирует.
+    """
+    try:
+        api_id = int(os.environ["API_ID"])
+        api_hash = os.environ["API_HASH"]
+    except KeyError as error:
+        raise RuntimeError(
+            f"{error.args[0]} не найден в .env — без него в Telegram не пойти"
+        ) from error
+    return TelegramClient(SESSION_NAME, api_id, api_hash)
 
 
 class RawPost(BaseModel):
@@ -92,7 +109,7 @@ async def iter_posts(
     limit: int, channels: list[str] | None = None
 ) -> AsyncIterator[RawPost]:
     """limit — сколько последних постов брать С КАЖДОГО канала."""
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    client = make_client()
     await client.start()
     try:
         # Явный список важнее подписок: аргумент -> .env -> подписки.

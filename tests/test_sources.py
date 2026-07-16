@@ -106,12 +106,44 @@ async def test_private_channel_is_skipped_loudly(capsys):
     assert "Приватный" in capsys.readouterr().out
 
 
+# ---------- секреты нужны сети, а не импорту ----------
+
+
+def test_import_does_not_require_secrets():
+    """
+    Пойман на деплое: раньше `API_ID = int(os.environ["API_ID"])` стоял на
+    уровне модуля, и любой импорт требовал секретов. На свежем клоне тесты
+    из-за этого не собирались вовсе — KeyError падал на сборе, до единой
+    проверки. Локально не видно: .env лежит рядом и всё молча работает.
+    """
+    import importlib
+
+    from src.sources import telegram
+
+    importlib.reload(telegram)  # не должно бросить даже без .env
+
+
+def test_make_client_explains_missing_credentials(monkeypatch):
+    """Без ключей — понятная ошибка, а не голый KeyError из недр."""
+    monkeypatch.delenv("API_ID", raising=False)
+    monkeypatch.delenv("API_HASH", raising=False)
+
+    with pytest.raises(RuntimeError, match="API_ID"):
+        telegram_module.make_client()
+
+
 # ---------- приоритет: аргумент -> .env -> подписки ----------
 
 
 @pytest.fixture
 def fake_telethon(monkeypatch):
-    """Подменяем клиент целиком: сети в тестах нет. Возвращает, что прочитали."""
+    """
+    Подменяем ФАБРИКУ клиента, а не сам TelegramClient.
+
+    make_client читает креды из .env — подменив только TelegramClient, тест
+    всё равно требовал бы секретов и падал на чистой машине. Фабрика для того
+    и заведена: секреты нужны тому, кто идёт в сеть, а не тесту.
+    """
     read_from: list[str] = []
 
     class _Client(_FakeClient):
@@ -129,7 +161,7 @@ def fake_telethon(monkeypatch):
             return
             yield  # делает метод асинхронным генератором
 
-    monkeypatch.setattr(telegram_module, "TelegramClient", _Client)
+    monkeypatch.setattr(telegram_module, "make_client", lambda: _Client())
     return read_from
 
 

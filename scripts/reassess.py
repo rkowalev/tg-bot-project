@@ -33,13 +33,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from telethon import TelegramClient  # noqa: E402
-
 from src.delivery.telegram_bot import format_message  # noqa: E402
 from src.enrichment import enrich_vacancy  # noqa: E402
 from src.filters import filter_vacancy  # noqa: E402
 from src.parsing import parse_vacancy  # noqa: E402
-from src.sources.telegram import API_ID, API_HASH, SESSION_NAME  # noqa: E402
+from src.sources.telegram import make_client  # noqa: E402
 from src.storage import (  # noqa: E402
     connect,
     criteria_fingerprint,
@@ -72,7 +70,7 @@ async def _fetch_posts(rows) -> dict[str, str]:
     for row in missing:
         by_channel.setdefault(row["channel"], []).append(row)
 
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    client = make_client()
     await client.start()
     try:
         for channel, channel_rows in by_channel.items():
