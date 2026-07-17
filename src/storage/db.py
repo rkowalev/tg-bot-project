@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS vacancies (
     message      TEXT,
     delivered_at TEXT,
     seen_at      TEXT,
+    -- РЕШЕНИЕ ПОЛЬЗОВАТЕЛЯ: applied / rejected / NULL.
+    -- Не путать с seen_at: тот значит «бот показал», а это «я разобрался».
+    -- Без него архив заставляет каждый раз перечитывать одни и те же вакансии.
+    decision     TEXT,
+    decided_at   TEXT,
     -- под какими критериями вакансию оценивали. Без этого не отличить
     -- протухшую запись от свежей, и переоценка платит ИИ за все подряд.
     criteria_hash TEXT
@@ -80,6 +85,8 @@ _LATE_COLUMNS = {
     "criteria_hash": "TEXT",
     "salary_currency": "TEXT",
     "raw_text": "TEXT",
+    "decision": "TEXT",
+    "decided_at": "TEXT",
 }
 
 _WHITESPACE = re.compile(r"\s+")
@@ -393,32 +400,82 @@ def count_unseen(conn: sqlite3.Connection) -> int:
     ).fetchone()["n"]
 
 
+# SELECT rowid, * — а не просто *: rowid нужен как короткий ключ для
+# callback_data кнопок «Откликнулся/Не буду». content_hash туда не влезает —
+# он 64 символа, а лимит callback_data ровно 64 байта вместе с префиксом.
+
+
 def unseen_vacancies(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM vacancies WHERE seen_at IS NULL ORDER BY posted_at DESC"
+        "SELECT rowid, * FROM vacancies WHERE seen_at IS NULL ORDER BY posted_at DESC"
     ).fetchall()
 
 
 def vacancies_since(conn: sqlite3.Connection, since: datetime) -> list[sqlite3.Row]:
     """Срез по дате поста — для кнопок 'за сегодня/3 дня/неделю'."""
     return conn.execute(
-        "SELECT * FROM vacancies WHERE posted_at >= ? ORDER BY posted_at DESC",
+        "SELECT rowid, * FROM vacancies WHERE posted_at >= ? ORDER BY posted_at DESC",
         (since.isoformat(),),
     ).fetchall()
 
 
-def count_vacancies(conn: sqlite3.Connection, score: str | None = None) -> int:
-    """score=None — все. В базе живут только high и medium: low до неё не доходит."""
-    if score is None:
-        return conn.execute("SELECT COUNT(*) AS n FROM vacancies").fetchone()["n"]
+# ---------- решение пользователя по вакансии ----------
+
+APPLIED = "applied"
+REJECTED = "rejected"
+
+
+def set_decision(conn: sqlite3.Connection, rowid: int, decision: str | None) -> None:
+    """
+    Отметить «откликнулся» / «не буду» / снять отметку (decision=None).
+
+    seen_at не трогаем: это разные вещи. seen_at — «бот показал», decision —
+    «я разобрался». Первое ставится автоматически при показе, второе только
+    руками.
+    """
+    conn.execute(
+        "UPDATE vacancies SET decision = ?, decided_at = ? WHERE rowid = ?",
+        (
+            decision,
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if decision
+            else None,
+            rowid,
+        ),
+    )
+    conn.commit()
+
+
+def get_vacancy(conn: sqlite3.Connection, rowid: int) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT COUNT(*) AS n FROM vacancies WHERE score = ?", (score,)
+        "SELECT rowid, * FROM vacancies WHERE rowid = ?", (rowid,)
+    ).fetchone()
+
+
+def _archive_where(score: str | None, undecided: bool) -> tuple[str, list]:
+    """Условия архива в одном месте: иначе count и выборка разъедутся."""
+    conditions, params = [], []
+    if score is not None:
+        conditions.append("score = ?")
+        params.append(score)
+    if undecided:
+        conditions.append("decision IS NULL")
+    return (f" WHERE {' AND '.join(conditions)}" if conditions else ""), params
+
+
+def count_archive(
+    conn: sqlite3.Connection, score: str | None = None, undecided: bool = False
+) -> int:
+    where, params = _archive_where(score, undecided)
+    return conn.execute(
+        f"SELECT COUNT(*) AS n FROM vacancies{where}", params
     ).fetchone()["n"]
 
 
 def vacancies_page(
     conn: sqlite3.Connection,
     score: str | None = None,
+    undecided: bool = False,
     limit: int = 10,
     offset: int = 0,
 ) -> list[sqlite3.Row]:
@@ -426,16 +483,16 @@ def vacancies_page(
     Архив: всё, что есть, независимо от seen_at и возраста поста.
     Без этого показанная вакансия старше недели недостижима из бота — в БД
     лежит, а показать нечем.
+
+    undecided=True — только те, по которым решения ещё нет. Ради этого фильтра
+    всё и затевалось: без него архив заставляет перечитывать вакансии, которые
+    уже разобрал.
     """
-    if score is None:
-        return conn.execute(
-            "SELECT * FROM vacancies ORDER BY posted_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
+    where, params = _archive_where(score, undecided)
     return conn.execute(
-        "SELECT * FROM vacancies WHERE score = ? ORDER BY posted_at DESC "
+        f"SELECT rowid, * FROM vacancies{where} ORDER BY posted_at DESC "
         "LIMIT ? OFFSET ?",
-        (score, limit, offset),
+        [*params, limit, offset],
     ).fetchall()
 
 

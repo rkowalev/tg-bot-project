@@ -50,15 +50,19 @@ from src.profile import (
     parse_salary,
 )
 from src.storage import (
+    APPLIED,
+    REJECTED,
     connect,
+    count_archive,
     count_unseen,
-    count_vacancies,
     get_criteria,
     get_last_fetch_at,
     get_last_fetch_found,
+    get_vacancy,
     is_fetch_enabled,
     mark_seen_vacancy,
     save_criteria,
+    set_decision,
     set_fetch_enabled,
     touch_last_fetch,
     unseen_vacancies,
@@ -174,6 +178,61 @@ def _confirm_keyboard(criteria) -> InlineKeyboardMarkup:
 digest_keyboard = InlineKeyboardMarkup(
     inline_keyboard=[[InlineKeyboardButton(text="Показать", callback_data="show_new")]]
 )
+
+
+def _decision_keyboard(rowid: int, decision: str | None) -> InlineKeyboardMarkup:
+    """
+    Кнопки под карточкой. Ключ — rowid, а не content_hash: тот 64 символа, а
+    вместе с префиксом в callback_data влезает только 64 БАЙТА целиком.
+
+    Обе кнопки остаются после нажатия, выбранная помечена: решение меняется
+    перещёлкиванием. Нажал не то — поправил, а не искал вакансию заново.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=("✅ Откликнулся" if decision == APPLIED else "Откликнулся"),
+                    callback_data=f"d:a:{rowid}",
+                ),
+                InlineKeyboardButton(
+                    text=("🚫 Не буду" if decision == REJECTED else "Не буду"),
+                    callback_data=f"d:r:{rowid}",
+                ),
+            ]
+        ]
+    )
+
+
+@router.callback_query(F.data.startswith("d:"))
+async def cb_decision(callback: CallbackQuery) -> None:
+    """Пометить вакансию решением. Повторное нажатие той же кнопки — снять."""
+    with suppress(TelegramBadRequest):
+        await callback.answer()
+
+    _, kind, raw_id = callback.data.split(":")
+    rowid = int(raw_id)
+    wanted = APPLIED if kind == "a" else REJECTED
+
+    conn = connect()
+    try:
+        row = get_vacancy(conn, rowid)
+        if row is None:
+            # вакансию убрал reassess — карточка в чате осталась висеть
+            await callback.message.answer("Этой вакансии больше нет в базе.")
+            return
+        # нажал то же самое ещё раз -> снимаем отметку
+        decision = None if row["decision"] == wanted else wanted
+        set_decision(conn, rowid, decision)
+    finally:
+        conn.close()
+
+    with suppress(TelegramBadRequest):
+        # текст не трогаем, только кнопки: перерисовка всей карточки могла бы
+        # упереться в HTML-разметку, а нам нужен лишь маркер выбора
+        await callback.message.edit_reply_markup(
+            reply_markup=_decision_keyboard(rowid, decision)
+        )
 
 
 # Владелец в Москве, сервер в UTC. Показывать ему 04:02 вместо 07:02 — значит
@@ -495,7 +554,11 @@ async def _send_rows(message: Message, rows: list, mark_as_seen: bool) -> None:
     try:
         for row in shown:
             text = row["message"] or format_message_from_row(row)
-            await message.answer(text, disable_web_page_preview=True)
+            await message.answer(
+                text,
+                disable_web_page_preview=True,
+                reply_markup=_decision_keyboard(row["rowid"], row["decision"]),
+            )
             if conn is not None:
                 mark_seen_vacancy(conn, row["content_hash"])
         if conn is not None:
@@ -621,16 +684,26 @@ async def cb_show_new(callback: CallbackQuery, state: FSMContext) -> None:
 # ---------- архив: всё, что есть, включая показанное и старое ----------
 
 
-def _all_filter_keyboard(high: int, total: int) -> InlineKeyboardMarkup:
-    """low в БД не попадает, поэтому выбор ровно один: только high или всё."""
+def _all_filter_keyboard(todo: int, high: int, total: int) -> InlineKeyboardMarkup:
+    """
+    low в БД не попадает, поэтому по оценке выбор ровно один: high или всё.
+
+    «Без решения» — первым: это рабочий режим. Остальные два для случая
+    «где та вакансия, которую я видел на той неделе».
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🆕 Без решения ({todo})", callback_data="all:todo:0"
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text=f"🟢 Только high ({high})", callback_data="all:high:0"
                 ),
                 InlineKeyboardButton(text=f"📋 Все ({total})", callback_data="all:any:0"),
-            ]
+            ],
         ]
     )
 
@@ -640,8 +713,9 @@ async def btn_all(message: Message, state: FSMContext) -> None:
     await state.clear()
     conn = connect()
     try:
-        total = count_vacancies(conn)
-        high = count_vacancies(conn, score="high")
+        total = count_archive(conn)
+        high = count_archive(conn, score="high")
+        todo = count_archive(conn, undecided=True)
     finally:
         conn.close()
 
@@ -649,7 +723,9 @@ async def btn_all(message: Message, state: FSMContext) -> None:
         await message.answer("В базе пока пусто.")
         return
 
-    await message.answer("Что показать?", reply_markup=_all_filter_keyboard(high, total))
+    await message.answer(
+        "Что показать?", reply_markup=_all_filter_keyboard(todo, high, total)
+    )
 
 
 @router.callback_query(F.data.startswith("all:"))
@@ -661,14 +737,17 @@ async def cb_all_page(callback: CallbackQuery) -> None:
     with suppress(TelegramBadRequest):
         await callback.answer()
 
-    _, score_key, raw_offset = callback.data.split(":")
-    score = None if score_key == "any" else score_key
+    _, key, raw_offset = callback.data.split(":")
+    score = key if key == "high" else None
+    undecided = key == "todo"
     offset = int(raw_offset)
 
     conn = connect()
     try:
-        rows = vacancies_page(conn, score=score, limit=BATCH_LIMIT, offset=offset)
-        total = count_vacancies(conn, score=score)
+        rows = vacancies_page(
+            conn, score=score, undecided=undecided, limit=BATCH_LIMIT, offset=offset
+        )
+        total = count_archive(conn, score=score, undecided=undecided)
     finally:
         conn.close()
 
@@ -679,7 +758,11 @@ async def cb_all_page(callback: CallbackQuery) -> None:
     # seen не трогаем: архив — это просмотр, а не выдача новых
     for row in rows:
         text = row["message"] or format_message_from_row(row)
-        await callback.message.answer(text, disable_web_page_preview=True)
+        await callback.message.answer(
+            text,
+            disable_web_page_preview=True,
+            reply_markup=_decision_keyboard(row["rowid"], row["decision"]),
+        )
 
     shown = offset + len(rows)
     if shown < total:
@@ -690,7 +773,7 @@ async def cb_all_page(callback: CallbackQuery) -> None:
                     [
                         InlineKeyboardButton(
                             text="Показать ещё",
-                            callback_data=f"all:{score_key}:{shown}",
+                            callback_data=f"all:{key}:{shown}",
                         )
                     ]
                 ]

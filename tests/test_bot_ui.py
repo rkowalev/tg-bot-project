@@ -268,8 +268,14 @@ async def test_period_window_is_utc_not_local(monkeypatch):
 # ---------- архив и правка критериев ----------
 
 
-def _row(title, score="medium"):
-    return {"message": f"карточка: {title}", "content_hash": title, "score": score}
+def _row(title, score="medium", decision=None, rowid=1):
+    return {
+        "message": f"карточка: {title}",
+        "content_hash": title,
+        "score": score,
+        "rowid": rowid,
+        "decision": decision,
+    }
 
 
 async def test_criteria_edit_reuses_card_without_resume(monkeypatch):
@@ -317,12 +323,12 @@ async def test_archive_shows_seen_and_old(monkeypatch):
     """Архив не смотрит ни на seen_at, ни на возраст — иначе он бесполезен."""
     asked = {}
     monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(bot_ui, "count_vacancies", lambda conn, score=None: 3)
+    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False: 3)
     monkeypatch.setattr(
         bot_ui,
         "vacancies_page",
-        lambda conn, score=None, limit=10, offset=0: asked.update(
-            score=score, offset=offset
+        lambda conn, score=None, undecided=False, limit=10, offset=0: asked.update(
+            score=score, offset=offset, undecided=undecided
         )
         or [_row("старая, уже показанная")],
     )
@@ -332,17 +338,19 @@ async def test_archive_shows_seen_and_old(monkeypatch):
 
     await bot_ui.cb_all_page(callback)
 
-    assert asked == {"score": None, "offset": 0}
+    assert asked == {"score": None, "offset": 0, "undecided": False}
 
 
 async def test_archive_filters_by_high(monkeypatch):
     asked = {}
     monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(bot_ui, "count_vacancies", lambda conn, score=None: 1)
+    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False: 1)
     monkeypatch.setattr(
         bot_ui,
         "vacancies_page",
-        lambda conn, score=None, limit=10, offset=0: asked.update(score=score)
+        lambda conn, score=None, undecided=False, limit=10, offset=0: asked.update(
+            score=score, undecided=undecided
+        )
         or [_row("хай", "high")],
     )
     callback = SimpleNamespace(
@@ -351,17 +359,19 @@ async def test_archive_filters_by_high(monkeypatch):
 
     await bot_ui.cb_all_page(callback)
 
-    assert asked == {"score": "high"}
+    assert asked == {"score": "high", "undecided": False}
 
 
 async def test_archive_paging_offsets_forward(monkeypatch):
     """«Показать ещё» обязана вести на следующую пачку, а не на ту же."""
     monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(bot_ui, "count_vacancies", lambda conn, score=None: 25)
+    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False: 25)
     monkeypatch.setattr(
         bot_ui,
         "vacancies_page",
-        lambda conn, score=None, limit=10, offset=0: [_row(f"v{i}") for i in range(10)],
+        lambda conn, score=None, undecided=False, limit=10, offset=0: [
+            _row(f"v{i}") for i in range(10)
+        ],
     )
     sent = []
     callback = SimpleNamespace(
