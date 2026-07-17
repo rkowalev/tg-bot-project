@@ -731,28 +731,39 @@ async def btn_all(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("all:"))
 async def cb_all_page(callback: CallbackQuery) -> None:
     """
-    Архив листается через offset в callback_data: состояние тут не нужно и
-    только мешало бы — кнопка «Показать ещё» должна работать и через сутки.
+    Архив листается КУРСОРОМ (posted_at последней показанной), а не offset:
+    набор «без решения» тает по мере разметки, и offset по нему промахивается.
+    Состояния тут нет намеренно — кнопка «Показать ещё» должна работать и
+    через сутки.
     """
     with suppress(TelegramBadRequest):
         await callback.answer()
 
-    _, key, raw_offset = callback.data.split(":")
+    # split(':', 2): курсор — это ISO-время, в нём самом есть двоеточия
+    _, key, cursor = callback.data.split(":", 2)
     score = key if key == "high" else None
     undecided = key == "todo"
-    offset = int(raw_offset)
+    before = cursor or None
 
     conn = connect()
     try:
         rows = vacancies_page(
-            conn, score=score, undecided=undecided, limit=BATCH_LIMIT, offset=offset
+            conn, score=score, undecided=undecided, limit=BATCH_LIMIT, before=before
         )
-        total = count_archive(conn, score=score, undecided=undecided)
+        if not rows:
+            left = 0
+        else:
+            # сколько осталось ПОСЛЕ этой пачки — считаем от последней показанной
+            left = count_archive(
+                conn, score=score, undecided=undecided, before=rows[-1]["posted_at"]
+            )
     finally:
         conn.close()
 
     if not rows:
-        await callback.message.answer("Ничего нет.")
+        # Курсор дошёл до конца — а не «данные пропали». Раньше здесь врал
+        # offset, уехавший за границу сократившегося набора.
+        await callback.message.answer("Больше ничего нет.")
         return
 
     # seen не трогаем: архив — это просмотр, а не выдача новых
@@ -764,23 +775,22 @@ async def cb_all_page(callback: CallbackQuery) -> None:
             reply_markup=_decision_keyboard(row["rowid"], row["decision"]),
         )
 
-    shown = offset + len(rows)
-    if shown < total:
+    if left:
         await callback.message.answer(
-            f"Показал {shown} из {total}.",
+            f"Осталось ещё {left}.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
                             text="Показать ещё",
-                            callback_data=f"all:{key}:{shown}",
+                            callback_data=f"all:{key}:{rows[-1]['posted_at']}",
                         )
                     ]
                 ]
             ),
         )
     else:
-        await callback.message.answer(f"Это всё: {total}.")
+        await callback.message.answer("Это всё.")
 
 
 async def _show_period(

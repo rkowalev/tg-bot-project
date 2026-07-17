@@ -39,10 +39,10 @@ def conn(tmp_path):
     connection.close()
 
 
-def _vacancy(title="QA"):
+def _vacancy(title="QA", posted_at=NOW):
     return Vacancy(
         raw_text="текст",
-        posted_at=NOW,
+        posted_at=posted_at,
         is_vacancy=True,
         title=title,
         stack=["Python"],
@@ -52,13 +52,13 @@ def _vacancy(title="QA"):
     )
 
 
-def _save(conn, hash_value, score="high"):
+def _save(conn, hash_value, score="high", posted_at=NOW):
     save_vacancy(
         conn,
         hash_value=hash_value,
         channel="@ch",
         message_id=1,
-        vacancy=_vacancy(),
+        vacancy=_vacancy(posted_at=posted_at),
         score=score,
         reasoning="ок",
         link="https://t.me/ch/1",
@@ -264,3 +264,63 @@ async def test_handler_survives_missing_vacancy(monkeypatch):
     await bot_ui.cb_decision(callback)
 
     assert "больше нет" in answered[0]
+
+
+# ---------- курсор: разметка не должна ломать листание ----------
+
+
+def _save_many(conn, count):
+    """Разные posted_at — иначе курсор не на чем строить."""
+    for i in range(count):
+        _save(conn, f"h{i:02}", posted_at=NOW + timedelta(minutes=i))
+
+
+def test_marking_while_paging_skips_nothing(conn):
+    """
+    ГЛАВНЫЙ тест, на этом владелец и напоролся вживую.
+
+    Раньше листали по offset. Разметил первую десятку -> она выпала из набора
+    «без решения» -> следующие сдвинулись на её место -> offset=10 их
+    ПЕРЕПРЫГНУЛ. Вакансии терялись молча, а в конце приходило «Ничего нет»
+    (кнопка вела на 40, а без решения осталось 32).
+    """
+    _save_many(conn, 25)
+
+    seen = []
+    cursor = None
+    for _ in range(5):  # с запасом
+        page = vacancies_page(conn, undecided=True, limit=10, before=cursor)
+        if not page:
+            break
+        seen.extend(r["content_hash"] for r in page)
+        cursor = page[-1]["posted_at"]
+        # размечаем всё показанное — набор тает прямо под курсором
+        for row in page:
+            set_decision(conn, row["rowid"], REJECTED)
+
+    assert len(seen) == 25, f"пропущены вакансии: показали {len(seen)} из 25"
+    assert len(set(seen)) == 25, "дубли при листании"
+
+
+def test_paging_without_marking_moves_forward(conn):
+    """Не размечаешь — всё равно листается вперёд, а не по кругу."""
+    _save_many(conn, 25)
+
+    first = vacancies_page(conn, undecided=True, limit=10)
+    second = vacancies_page(
+        conn, undecided=True, limit=10, before=first[-1]["posted_at"]
+    )
+
+    assert not set(r["content_hash"] for r in first) & set(
+        r["content_hash"] for r in second
+    ), "вторая страница повторяет первую"
+
+
+def test_cursor_counts_what_is_left(conn):
+    """Счётчик «осталось» считает от курсора, а не общее число."""
+    _save_many(conn, 25)
+    page = vacancies_page(conn, undecided=True, limit=10)
+
+    left = count_archive(conn, undecided=True, before=page[-1]["posted_at"])
+
+    assert left == 15

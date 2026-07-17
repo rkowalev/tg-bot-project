@@ -268,13 +268,14 @@ async def test_period_window_is_utc_not_local(monkeypatch):
 # ---------- архив и правка критериев ----------
 
 
-def _row(title, score="medium", decision=None, rowid=1):
+def _row(title, score="medium", decision=None, rowid=1, posted_at="2026-07-16T04:00:00+00:00"):
     return {
         "message": f"карточка: {title}",
         "content_hash": title,
         "score": score,
         "rowid": rowid,
         "decision": decision,
+        "posted_at": posted_at,
     }
 
 
@@ -323,38 +324,38 @@ async def test_archive_shows_seen_and_old(monkeypatch):
     """Архив не смотрит ни на seen_at, ни на возраст — иначе он бесполезен."""
     asked = {}
     monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False: 3)
+    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False, before=None: 3)
     monkeypatch.setattr(
         bot_ui,
         "vacancies_page",
-        lambda conn, score=None, undecided=False, limit=10, offset=0: asked.update(
-            score=score, offset=offset, undecided=undecided
+        lambda conn, score=None, undecided=False, limit=10, before=None: asked.update(
+            score=score, before=before, undecided=undecided
         )
         or [_row("старая, уже показанная")],
     )
     callback = SimpleNamespace(
-        answer=AsyncMock(), data="all:any:0", message=SimpleNamespace(answer=AsyncMock())
+        answer=AsyncMock(), data="all:any:", message=SimpleNamespace(answer=AsyncMock())
     )
 
     await bot_ui.cb_all_page(callback)
 
-    assert asked == {"score": None, "offset": 0, "undecided": False}
+    assert asked == {"score": None, "before": None, "undecided": False}
 
 
 async def test_archive_filters_by_high(monkeypatch):
     asked = {}
     monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False: 1)
+    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False, before=None: 1)
     monkeypatch.setattr(
         bot_ui,
         "vacancies_page",
-        lambda conn, score=None, undecided=False, limit=10, offset=0: asked.update(
+        lambda conn, score=None, undecided=False, limit=10, before=None: asked.update(
             score=score, undecided=undecided
         )
         or [_row("хай", "high")],
     )
     callback = SimpleNamespace(
-        answer=AsyncMock(), data="all:high:0", message=SimpleNamespace(answer=AsyncMock())
+        answer=AsyncMock(), data="all:high:", message=SimpleNamespace(answer=AsyncMock())
     )
 
     await bot_ui.cb_all_page(callback)
@@ -362,30 +363,64 @@ async def test_archive_filters_by_high(monkeypatch):
     assert asked == {"score": "high", "undecided": False}
 
 
-async def test_archive_paging_offsets_forward(monkeypatch):
-    """«Показать ещё» обязана вести на следующую пачку, а не на ту же."""
+async def test_archive_next_page_uses_cursor_of_last_shown(monkeypatch):
+    """
+    «Показать ещё» ведёт от ПОСЛЕДНЕЙ показанной, а не от порядкового номера.
+    Иначе разметка сдвигает набор под ногами и следующая пачка промахивается.
+    """
     monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(bot_ui, "count_archive", lambda conn, score=None, undecided=False: 25)
+    monkeypatch.setattr(
+        bot_ui, "count_archive", lambda conn, score=None, undecided=False, before=None: 15
+    )
     monkeypatch.setattr(
         bot_ui,
         "vacancies_page",
-        lambda conn, score=None, undecided=False, limit=10, offset=0: [
-            _row(f"v{i}") for i in range(10)
+        lambda conn, score=None, undecided=False, limit=10, before=None: [
+            _row(f"v{i}", posted_at=f"2026-07-16T04:00:{i:02}+00:00") for i in range(10)
         ],
     )
     sent = []
     callback = SimpleNamespace(
         answer=AsyncMock(),
-        data="all:any:10",
-        message=SimpleNamespace(answer=AsyncMock(side_effect=lambda text, **kw: sent.append((text, kw)))),
+        data="all:todo:",
+        message=SimpleNamespace(
+            answer=AsyncMock(side_effect=lambda text, **kw: sent.append((text, kw)))
+        ),
     )
 
     await bot_ui.cb_all_page(callback)
 
     tail_text, tail_kw = sent[-1]
-    assert "20 из 25" in tail_text
+    assert "Осталось ещё 15" in tail_text
     next_button = tail_kw["reply_markup"].inline_keyboard[0][0]
-    assert next_button.callback_data == "all:any:20"
+    assert next_button.callback_data == "all:todo:2026-07-16T04:00:09+00:00"
+    assert len(next_button.callback_data.encode()) <= 64
+
+
+async def test_archive_end_says_no_more(monkeypatch):
+    """
+    Пустой ответ = «долистал до конца», а не «данные пропали». Раньше здесь
+    врал offset, уехавший за границу сократившегося набора: приходило
+    «Ничего нет», хотя вакансии были на месте.
+    """
+    monkeypatch.setattr(bot_ui, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(
+        bot_ui,
+        "vacancies_page",
+        lambda conn, score=None, undecided=False, limit=10, before=None: [],
+    )
+    sent = []
+    callback = SimpleNamespace(
+        answer=AsyncMock(),
+        data="all:todo:2026-07-16T04:00:00+00:00",
+        message=SimpleNamespace(
+            answer=AsyncMock(side_effect=lambda text, **kw: sent.append(text))
+        ),
+    )
+
+    await bot_ui.cb_all_page(callback)
+
+    assert "Больше ничего нет" in sent[0]
 
 
 async def test_resume_text_still_reaches_parser(routing):

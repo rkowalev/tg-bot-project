@@ -452,7 +452,9 @@ def get_vacancy(conn: sqlite3.Connection, rowid: int) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def _archive_where(score: str | None, undecided: bool) -> tuple[str, list]:
+def _archive_where(
+    score: str | None, undecided: bool, before: str | None
+) -> tuple[str, list]:
     """Условия архива в одном месте: иначе count и выборка разъедутся."""
     conditions, params = [], []
     if score is not None:
@@ -460,13 +462,19 @@ def _archive_where(score: str | None, undecided: bool) -> tuple[str, list]:
         params.append(score)
     if undecided:
         conditions.append("decision IS NULL")
+    if before:
+        conditions.append("posted_at < ?")
+        params.append(before)
     return (f" WHERE {' AND '.join(conditions)}" if conditions else ""), params
 
 
 def count_archive(
-    conn: sqlite3.Connection, score: str | None = None, undecided: bool = False
+    conn: sqlite3.Connection,
+    score: str | None = None,
+    undecided: bool = False,
+    before: str | None = None,
 ) -> int:
-    where, params = _archive_where(score, undecided)
+    where, params = _archive_where(score, undecided, before)
     return conn.execute(
         f"SELECT COUNT(*) AS n FROM vacancies{where}", params
     ).fetchone()["n"]
@@ -477,7 +485,7 @@ def vacancies_page(
     score: str | None = None,
     undecided: bool = False,
     limit: int = 10,
-    offset: int = 0,
+    before: str | None = None,
 ) -> list[sqlite3.Row]:
     """
     Архив: всё, что есть, независимо от seen_at и возраста поста.
@@ -485,14 +493,23 @@ def vacancies_page(
     лежит, а показать нечем.
 
     undecided=True — только те, по которым решения ещё нет. Ради этого фильтра
-    всё и затевалось: без него архив заставляет перечитывать вакансии, которые
-    уже разобрал.
+    всё и затевалось: без него архив заставляет перечитывать уже разобранное.
+
+    КУРСОР (before), а не OFFSET. Разница принципиальна именно для undecided:
+    набор тает по мере разметки, и offset по нему промахивается. Разметил
+    первую десятку -> следующие сдвинулись на её место -> offset=10 их
+    ПЕРЕПРЫГИВАЕТ, и ты их никогда не увидишь. А когда offset уезжает за
+    конец, приходит «Ничего нет» на ровном месте (поймано на живых данных:
+    кнопка вела на 40, а без решения осталось 32).
+
+    Курсор — posted_at последней показанной. Проверено на боевой базе: NULL
+    нет, формат у всех один (+00:00), дублей нет — строковое сравнение честно
+    повторяет порядок сортировки.
     """
-    where, params = _archive_where(score, undecided)
+    where, params = _archive_where(score, undecided, before)
     return conn.execute(
-        f"SELECT rowid, * FROM vacancies{where} ORDER BY posted_at DESC "
-        "LIMIT ? OFFSET ?",
-        [*params, limit, offset],
+        f"SELECT rowid, * FROM vacancies{where} ORDER BY posted_at DESC LIMIT ?",
+        [*params, limit],
     ).fetchall()
 
 
