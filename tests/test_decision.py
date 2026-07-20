@@ -324,3 +324,40 @@ def test_cursor_counts_what_is_left(conn):
     left = count_archive(conn, undecided=True, before=page[-1]["posted_at"])
 
     assert left == 15
+
+
+async def test_filter_buttons_open_first_page(monkeypatch):
+    """
+    Поймано вживую: «Без решения (31)» -> «Больше ничего нет». Кнопки меню
+    архива слали callback_data с хвостом ':0', а хендлер теперь читает третью
+    часть как КУРСОР. '0' — непустая строка, и запрос 'posted_at < 0' не
+    находил ничего. Стартовая кнопка обязана открывать ПЕРВУЮ страницу
+    (курсор пустой), а не искать до несуществующей даты.
+
+    Тест гоняет НАСТОЯЩИЕ кнопки клавиатуры через хендлер — иначе фейковый
+    callback_data скрыл бы именно эту рассинхронизацию.
+    """
+    keyboard = bot_ui._all_filter_keyboard(todo=5, high=2, total=10)
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+
+    asked = []
+    monkeypatch.setattr(bot_ui, "connect", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(
+        bot_ui,
+        "vacancies_page",
+        lambda conn, score=None, undecided=False, limit=10, before=None: asked.append(before)
+        or [],
+    )
+
+    for button in buttons:
+        await bot_ui.cb_all_page(
+            SimpleNamespace(
+                answer=AsyncMock(),
+                data=button.callback_data,
+                message=SimpleNamespace(answer=AsyncMock()),
+            )
+        )
+
+    assert asked == [None, None, None], (
+        f"стартовые кнопки ушли не с пустым курсором: {asked}"
+    )

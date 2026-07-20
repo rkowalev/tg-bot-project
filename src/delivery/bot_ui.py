@@ -695,14 +695,14 @@ def _all_filter_keyboard(todo: int, high: int, total: int) -> InlineKeyboardMark
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"🆕 Без решения ({todo})", callback_data="all:todo:0"
+                    text=f"🆕 Без решения ({todo})", callback_data="all:todo:"
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=f"🟢 Только high ({high})", callback_data="all:high:0"
+                    text=f"🟢 Только high ({high})", callback_data="all:high:"
                 ),
-                InlineKeyboardButton(text=f"📋 Все ({total})", callback_data="all:any:0"),
+                InlineKeyboardButton(text=f"📋 Все ({total})", callback_data="all:any:"),
             ],
         ]
     )
